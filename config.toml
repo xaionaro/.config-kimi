@@ -1,0 +1,113 @@
+default_model = "kimi-code/k3"
+default_permission_mode = "yolo"
+telemetry = false
+
+[providers."managed:kimi-code"]
+type = "kimi"
+api_key = ""
+base_url = "https://api.kimi.com/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
+display_name = "K2.7 Coding"
+
+[models."kimi-code/kimi-for-coding-highspeed"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding-highspeed"
+max_context_size = 262144
+capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
+display_name = "K2.7 Coding Highspeed"
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
+display_name = "K3"
+support_efforts = [ "low", "high", "max" ]
+default_effort = "max"
+
+[thinking]
+enabled = true
+effort = "max"
+
+[services.moonshot_search]
+base_url = "https://api.kimi.com/coding/v1/search"
+api_key = ""
+
+[services.moonshot_search.oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[services.moonshot_fetch]
+base_url = "https://api.kimi.com/coding/v1/fetch"
+api_key = ""
+
+[services.moonshot_fetch.oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+
+# --- Ported from ~/.codex/hooks.json (codex setup) ---
+# NOTE: codex's apply_patch wiring is not ported (kimi has no apply_patch tool);
+# codex's SessionStart matcher value "clear" has no kimi equivalent and is dropped.
+# codex hook "statusMessage" fields have no kimi equivalent and are dropped.
+
+[[hooks]]
+event = "SessionStart"
+matcher = "startup|resume"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/session-snapshot.sh\"'"
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/prompt-task-reminder.sh\"'"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^Bash$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/validate-bash.sh\"'"
+timeout = 75
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^Bash$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-pre-reviewer.sh\"'"
+timeout = 75
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^(Edit|Write)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/validate-edit-write.sh\"'"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^(Edit|Write)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/security-reminder.py\"'"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^(Edit|Write)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/eci-active-gate.sh\"'"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^(Edit|Write)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/ate-orchestrator-gate.sh\"'"
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "^(Edit|Write)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-pre-reviewer.sh\"'"
+timeout = 75
+
+[[hooks]]
+event = "Stop"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/stop-gate.sh\"'"
+timeout = 300

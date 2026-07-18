@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "/home/pheona/.kimi-code/bin/context7-mcp",
+      "args": []
+    },
+    "omx_state": {
+      "command": "omx",
+      "args": ["mcp-serve", "state"],
+      "enabled": false,
+      "startupTimeoutMs": 5000
+    },
+    "omx_memory": {
+      "command": "omx",
+      "args": ["mcp-serve", "memory"],
+      "enabled": false,
+      "startupTimeoutMs": 5000
+    },
+    "omx_code_intel": {
+      "command": "omx",
+      "args": ["mcp-serve", "code-intel"],
+      "enabled": false,
+      "startupTimeoutMs": 10000
+    },
+    "omx_trace": {
+      "command": "omx",
+      "args": ["mcp-serve", "trace"],
+      "enabled": false,
+      "startupTimeoutMs": 5000
+    },
+    "omx_wiki": {
+      "command": "omx",
+      "args": ["mcp-serve", "wiki"],
+      "enabled": false,
+      "startupTimeoutMs": 5000
+    }
+  }
+}

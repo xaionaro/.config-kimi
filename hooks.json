@@ -1,0 +1,89 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/session-snapshot.sh\"'",
+            "statusMessage": "Loading Kimi session rules"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/prompt-task-reminder.sh\"'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/validate-bash.sh\"'",
+            "timeout": 75,
+            "statusMessage": "Checking shell command"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-pre-reviewer.sh\"'",
+            "timeout": 75,
+            "statusMessage": "Checking first tool call"
+          }
+        ]
+      },
+      {
+        "matcher": "^(Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/validate-edit-write.sh\"'",
+            "statusMessage": "Checking file edit"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/security-reminder.py\"'",
+            "statusMessage": "Checking security-sensitive edit"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/eci-active-gate.sh\"'",
+            "statusMessage": "Checking ECI gate"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/ate-orchestrator-gate.sh\"'",
+            "statusMessage": "Checking role gate"
+          },
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-pre-reviewer.sh\"'",
+            "timeout": 75,
+            "statusMessage": "Checking first tool call"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/stop-gate.sh\"'",
+            "timeout": 300,
+            "statusMessage": "Checking stop criteria"
+          }
+        ]
+      }
+    ]
+  }
+}

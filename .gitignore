@@ -1,0 +1,25 @@
+# --- Sensitive data: credentials, tokens, identity ---
+credentials/
+oauth/
+user-history/
+device_id
+
+# --- Session & runtime state: machine-local, regenerated ---
+sessions/
+session_index.jsonl
+workspaces.json
+logs/
+telemetry/
+updates/
+cache/
+
+# --- Local config backups ---
+*.bak
+*.bak-*
+
+# --- Machine-specific tool binaries (large, restorable) ---
+/bin/kimi
+/bin/fd
+
+# --- Lean build artifacts ---
+proofs/.lake/

@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# Manage the ECI active marker for the current Kimi session.
+
+set -euo pipefail
+
+base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$base_dir/hooks/lib/codex-proof-state.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  eci-active on "<task + scope>"
+  eci-active off <disengage-report.md>
+  eci-active status
+
+Set KIMI_SESSION_ID, or KIMI_THREAD_ID when KIMI_SESSION_ID is
+unset, to target a session. Without either, the newest real session
+directory under the proof root is used. Cwd-scoped ECI state is never
+created.
+EOF
+}
+
+resolve_session_dir() {
+  local root name newest="" newest_mtime=0 d mtime session_id session_var
+  root="$(codex_proof_root)"
+
+  if [ -n "${KIMI_SESSION_ID:-}" ]; then
+    session_id="$KIMI_SESSION_ID"
+    session_var="KIMI_SESSION_ID"
+  elif [ -n "${KIMI_THREAD_ID:-}" ]; then
+    session_id="$KIMI_THREAD_ID"
+    session_var="KIMI_THREAD_ID"
+  fi
+
+  if [ -n "${session_id:-}" ]; then
+    codex_valid_session_id "$session_id" || {
+      echo "Invalid $session_var; use only letters, digits, '_' or '-'." >&2
+      exit 1
+    }
+    printf '%s/%s\n' "$root" "$session_id"
+    return
+  fi
+
+  [ -d "$root" ] || return 1
+  shopt -s nullglob
+  for d in "$root"/*/; do
+    d="${d%/}"
+    name="${d##*/}"
+    codex_valid_session_id "$name" || continue
+    codex_reserved_proof_dir "$name" && continue
+    mtime=$(stat -c '%Y' "$d" 2>/dev/null) || continue
+    if [ "$mtime" -gt "$newest_mtime" ]; then
+      newest_mtime="$mtime"
+      newest="$d"
+    fi
+  done
+  shopt -u nullglob
+  [ -n "$newest" ] || return 1
+  printf '%s\n' "$newest"
+}
+
+validate_disengage_report() {
+  local report="$1"
+  local missing=""
+  local marker_error=""
+  local section
+
+  for section in "Stop checklist walkthrough" "Incomplete compliance"; do
+    if ! codex_markdown_section_has_body "$report" "$section"; then
+      missing="$missing \"$section\""
+    fi
+  done
+
+  if [ -n "$missing" ]; then
+    echo "Disengage report missing non-empty ECI section(s):$missing" >&2
+    return 1
+  fi
+
+  marker_error="$(codex_eci_terminal_verdict_error "Disengage report" "$report")"
+  if [ -n "$marker_error" ]; then
+    echo "$marker_error" >&2
+    return 1
+  fi
+
+  if codex_markdown_section_has_body "$report" "ECI completion certificate"; then
+    return 0
+  fi
+
+  local full_missing=""
+  for section in \
+    "Summary" \
+    "Verification" \
+    "Requirements" \
+    "Root Cause" \
+    "Claim Inventory" \
+    "Pre-Mortem" \
+    "Adversarial Critique" \
+    "Rule-Compliance Self-Audit" \
+    "Gaps"; do
+    if ! codex_markdown_section_has_body "$report" "$section"; then
+      full_missing="$full_missing \"$section\""
+    fi
+  done
+
+  if [ -n "$full_missing" ]; then
+    echo "Disengage report must include either a non-empty \"ECI completion certificate\" section or all full Kimi stop-verification sections." >&2
+    echo "Missing full stop-verification section(s):$full_missing" >&2
+    return 1
+  fi
+}
+
+remove_legacy_eci_markers_for_cwd() {
+  local keep="${1:-}"
+  local marker
+
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    [ -n "$keep" ] && [ "$marker" = "$keep" ] && continue
+    rm -f "$marker"
+  done < <(codex_legacy_eci_markers_for_cwd "$PWD" 2>/dev/null || true)
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  on)
+    shift
+    scope="${*:-}"
+    [ -n "$scope" ] || { usage; exit 2; }
+    session_dir="$(resolve_session_dir)" || {
+      echo "eci-active: no session directory found under $(codex_proof_root)" >&2
+      exit 1
+    }
+    marker="$session_dir/eci_active"
+    mkdir -p "$session_dir"
+    {
+      printf 'scope: %s\n' "$scope"
+      printf 'cwd: %s\n' "$PWD"
+      printf 'session_id: %s\n' "${session_dir##*/}"
+      date -u '+created_utc: %Y-%m-%dT%H:%M:%SZ'
+    } >"$marker"
+    remove_legacy_eci_markers_for_cwd "$marker"
+    printf 'ECI active: %s\n' "$marker"
+    ;;
+  off)
+    report="${2:-}"
+    markers=()
+    [ -n "$report" ] || { usage; exit 2; }
+    [ -f "$report" ] || { echo "Disengage report not found: $report" >&2; exit 1; }
+    session_dir="$(resolve_session_dir)" || {
+      echo "eci-active: no session directory found under $(codex_proof_root)" >&2
+      exit 1
+    }
+    marker="$session_dir/eci_active"
+    [ -f "$marker" ] && markers+=("$marker")
+    while IFS= read -r legacy_marker; do
+      [ -n "$legacy_marker" ] || continue
+      [ "$legacy_marker" = "$marker" ] && continue
+      markers+=("$legacy_marker")
+    done < <(codex_legacy_eci_markers_for_cwd "$PWD" 2>/dev/null || true)
+    [ "${#markers[@]}" -gt 0 ] || { echo "ECI marker is not active: $marker" >&2; exit 1; }
+    validate_disengage_report "$report"
+    rm -f "${markers[@]}"
+    printf 'ECI inactive. Disengage report validated: %s\n' "$report"
+    ;;
+  status)
+    session_dir="$(resolve_session_dir)" || {
+      echo "eci-active: no session directory found under $(codex_proof_root)" >&2
+      exit 1
+    }
+    marker="$session_dir/eci_active"
+    if [ -n "${marker:-}" ] && [ -f "$marker" ]; then
+      cat "$marker"
+    elif legacy_marker="$(codex_legacy_eci_markers_for_cwd "$PWD" 2>/dev/null | head -n1)" &&
+      [ -n "$legacy_marker" ] && [ -f "$legacy_marker" ]; then
+      cat "$legacy_marker"
+    else
+      echo "ECI inactive"
+    fi
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
