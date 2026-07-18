@@ -16,6 +16,7 @@ description: Use when writing, reviewing, or modifying Go code (*.go, go.mod, go
 ## Strong Typing
 
 - Named types for domain concepts (`type UserID uint64`, not bare `uint64`). Typed constants with iota. Use generics instead of `any`/`interface{}`.
+- Choose the underlying type by the domain's value space and operations, never by minimal byte width alone. A set of named values goes on an integer kind. For a closed set or fixed flag set whose wire form is fixed, keep the integer backing and translate in the marshalers. An ordered quantity goes on `int` unless range exceeding `int32`, interop, or footprint over millions of instances forces a specific kind. Fractional values go on integer kinds when exactness is required, float kinds only where rounding error is acceptable. A fixed set of up to 64 independent combinable flags goes on `uint64`. A growing flag set, or one over 64 flags, goes on a struct of bools.
 - Group related behavior through types, method sets, and interfaces — let the type system encode domain relationships instead of scattering them across unrelated functions.
 - One source of truth per logic/constant — define once, reference everywhere. Duplicated values drift.
 - Return values must be orthogonal. If a caller can derive one result from another without losing information, return only the authoritative result. Add another result only for independent state or ambiguity the authoritative result cannot encode.
@@ -23,8 +24,8 @@ description: Use when writing, reviewing, or modifying Go code (*.go, go.mod, go
 
 ## File tree
 
-- One file per semantic group: keep a type with its constructors, methods, and tightly-coupled helpers together.
-- Merge single-declaration files into their semantic group's file. Split files that mix unrelated semantic groups. Go-conventional layouts are exempt: main.go, doc.go, test files, generated code.
+- Keep a semantic group's members together — one domain concept: a type with its constructors, methods, and tightly-coupled helpers, plus types that share those helpers. Split a large group across files by sub-concern, and split a file holding multiple groups into per-group files, whenever each resulting file carries a complete concept (cohesion, not line count).
+- A declaration belongs in the non-exempt file of the group it serves or that most uses it, within its package; never alone in a file carrying no complete concept. When several files fit, or none does, keep the current file. Exempt: main.go, doc.go, test files, generated code.
 - Never use abstract file/directory/function names (like "helper", "wrapper", "adapter"). Every name should specifically and unambiguously explain the content, and every used word in the name has high cost.
 
 ## Naming
