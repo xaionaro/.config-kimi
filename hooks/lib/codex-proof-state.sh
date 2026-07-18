@@ -14,7 +14,7 @@ codex_valid_session_id() {
 
 codex_reserved_proof_dir() {
   case "${1:-}" in
-    activity|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|side-stop|skip-stop|skills)
+    activity|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|kimi-wire-warnings-*|side-stop|skip-stop|skills)
       return 0
       ;;
     *)
@@ -457,17 +457,43 @@ codex_hook_is_subagent_context() {
 #  - A foreground spawned agent holds an open tool.call (no tool.result) in
 #    agents/main/wire.jsonl for its entire run; main, blocked inside it,
 #    cannot emit further calls — except batched with the spawn: a batched
-#    [Agent, X] step fires X's hook with the Agent call open (main wire of
-#    session_a3d9d20a lines 940-941: Agent t=1784403893266, Write
+#    [Agent, X...] step fires each sibling X's hook with the Agent call open
+#    (session_a3d9d20a lines 940-941: Agent t=1784403893266, Write
 #    t=1784403893953, same stepUuid, 687 ms gap).
-#  - A batched sibling's hook fires <1 s after the Agent record; a real
-#    subagent's first tool fires seconds after spawn (min observed
-#    spawn-to-first-tool-call 7768 ms across 12 agents in session_a3d9d20a;
-#    min nonzero ttftMs 2856 ms in its log). The 2000 ms freshness floor
-#    separates the two. The 6 h ceiling (10x the longest observed live run,
-#    36.8 min) rejects stale open calls; session resume synthesizes
+#  - Sibling hook delay is the batch's cumulative hook latency, visible as
+#    tool.call record gaps: 76 batched [Agent+X] steps across the session
+#    corpus, max observed gap 1517 ms (session_dcf3436c step 5aabe8bd:
+#    Agent t=1784406871828, Write t=1784406873345, Agent open 213.9 s; a
+#    second >1 s instance in session_a3d9d20a, 1114 ms). A real foreground
+#    subagent's first tool fires seconds after spawn: min
+#    wire-creation-to-first-tool-call 5095 ms (n=17 agent wires,
+#    session_a3d9d20a); min nonzero ttftMs 2856 ms (n=500, its log). The
+#    3000 ms floor separates the two shapes with ~1.5 s headroom over the
+#    observed batched max and ~2.1 s under the observed spawn min; both
+#    samples are small and single-deployment. Residual (fail-open): a
+#    batched sibling whose cumulative hook delay exceeds 3000 ms is
+#    classified subagent — batch-scoped: every sibling tool of that step
+#    is exempted; the observed tail grows with batch size x hook latency.
+#  - The 6 h ceiling is ≈4.5x the longest observed completed foreground run
+#    (79.6 min, session_da1b7d20; corpus n≈272 call→result pairs after
+#    dropping background spawn-acks, resume-synthesized interruption
+#    results, and one instant already-running spawn error). Pure
+#    defense-in-depth for crash orphans on unknown-resume-behavior kimi
+#    versions; a misfire fails closed (deny). Session resume synthesizes
 #    interruption results for crash orphans (session_d56600db), so a live
 #    session cannot legitimately hold one.
+#  - Stop-hook assumption: no real subagent Stop fires <3 s after spawn
+#    (corpus min spawn→loop-end 5766 ms, a provider-error run; min
+#    completed 20409 ms; ttftMs min 2856 ms makes a sub-3 s Stop
+#    implausible; the only sub-2 s call→result is an instant
+#    "already running and cannot run concurrently" spawn error with no
+#    agent loop, hence no Stop hook). If one ever occurs: under the
+#    session's own eci_active marker stop-gate blocks subagent stops by
+#    design at any age (active_eci_marker_for_stop returns the own marker
+#    before the subagent exemption), so the misclassification changes
+#    nothing; under legacy/side-parent markers it costs one block that
+#    self-corrects on the next stop once the spawn age crosses 3000 ms.
+#    No spin-to-timeout and no deny-forever path arises from the floor.
 # Background agents close their call record at spawn ("status: running"
 # result), so their edits classify as main (denied under a marker): a
 # documented fail-closed limitation; ECI/ATE under a marker must use
@@ -475,12 +501,12 @@ codex_hook_is_subagent_context() {
 # (return 1), keeping deny-gates fail-closed. Matching is textual: a
 # non-Agent call whose raw args embed the literal "name":"Agent" substring
 # also contributes its toolCallId; the false positive is benign and
-# self-corrects when that call's own tool.result lands.
+# self-corrects when that call's own tool.result lands. A main edit
+# batched behind such a call is exempted only if cumulative hook latency
+# pushes its hook past the 3000 ms floor; no such wire observed.
 codex_hook_kimi_session_dir() {
   local sid="$1" root="$HOME/.kimi-code/sessions" d
-  case "$sid" in
-    ""|*[!A-Za-z0-9_-]*) return 1 ;;
-  esac
+  codex_valid_session_id "$sid" || return 1
   for d in "$root"/*/"$sid"; do
     [ -d "$d" ] || continue
     printf '%s\n' "$d"
@@ -492,7 +518,8 @@ codex_hook_kimi_session_dir() {
 codex_kimi_wire_security_warning() {
   local sid="$1" kind="$2" file
   codex_valid_session_id "$sid" || return 0
-  file="$(codex_proof_root)/security-warnings-$sid.json"
+  mkdir -p "$(codex_proof_root)" 2>/dev/null || true
+  file="$(codex_proof_root)/kimi-wire-warnings-$sid.jsonl"
   if [ -f "$file" ] && grep -qF "\"$kind\"" "$file" 2>/dev/null; then
     return 0
   fi
@@ -516,6 +543,7 @@ codex_hook_is_subagent_context_kimi() {
   fi
 
   now_ms=$(( $(date +%s%N) / 1000000 ))
+  # substr offsets: len('"toolCallId":"')=14 (+1 closing quote=15); len('"time":')=7 (+1 trailing brace=8).
   awk -v now="$now_ms" '
     index($0, "\"event\":{\"type\":\"tool.call\"") &&
       (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
@@ -537,7 +565,7 @@ codex_hook_is_subagent_context_kimi() {
       for (id in open) {
         if (open[id] == "") continue          # no record time → fail closed
         age = now - open[id]
-        if (age >= 2000 && age <= 21600000) { found = 1; break }
+        if (age >= 3000 && age <= 21600000) { found = 1; break }
       }
       exit(found ? 0 : 1)
     }

@@ -1302,7 +1302,7 @@ test_subagent_helper_kimi_protocol_mismatch_warns() {
   dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
   wire="$dir/agents/main/wire.jsonl"
   output="$TMP_ROOT/kimi-protocol-mismatch.out"
-  warn="$TMP_ROOT/home/.cache/kimi-proof/security-warnings-session_kimi-probe.json"
+  warn="$TMP_ROOT/home/.cache/kimi-proof/kimi-wire-warnings-session_kimi-probe.jsonl"
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   mkdir -p "$(dirname "$wire")" "$TMP_ROOT/home/.cache/kimi-proof" || return 1
@@ -1419,6 +1419,163 @@ test_eci_active_gate_kimi_no_marker_allows() {
     HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
 
   expect_no_output "$out"
+}
+
+test_subagent_helper_kimi_protocol_warning_channel_isolation() {
+  local dir wire input output warn_old warn_new
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-warn-isolation.out"
+  warn_old="$TMP_ROOT/home/.cache/kimi-proof/security-warnings-session_kimi-probe.json"
+  warn_new="$TMP_ROOT/home/.cache/kimi-proof/kimi-wire-warnings-session_kimi-probe.jsonl"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  mkdir -p "$(dirname "$wire")" "$TMP_ROOT/home/.cache/kimi-proof" || return 1
+  printf '%s\n' '[{"kind":"security-warning","message":"seed"}]' >"$warn_old" || return 1
+  cat >"$wire" <<'JSON' || return 1
+{"type":"metadata","protocol_version":"9.9","created_at":1784381699557}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":1}
+JSON
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  [ -f "$warn_new" ] || return 1
+  [ "$(wc -l <"$warn_new")" -eq 1 ] || return 1
+  grep -qF '"kind":"wire-protocol-mismatch"' "$warn_new" || return 1
+  [ "$(cat "$warn_old")" = '[{"kind":"security-warning","message":"seed"}]' ]
+}
+
+test_subagent_helper_kimi_protocol_warning_mkdir() {
+  local dir wire input output warn
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-warn-mkdir.out"
+  warn="$TMP_ROOT/home/.cache/kimi-proof/kimi-wire-warnings-session_kimi-probe.jsonl"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  mkdir -p "$(dirname "$wire")" || return 1
+  rm -rf "$TMP_ROOT/home/.cache/kimi-proof" || return 1
+  printf '%s\n' '{"type":"metadata","protocol_version":"9.9","created_at":1784381699557}' >"$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  [ -f "$warn" ] || return 1
+  grep -qF '"kind":"wire-protocol-mismatch"' "$warn"
+}
+
+test_subagent_helper_kimi_wire_warnings_reserved_glob() {
+  local output="$TMP_ROOT/kimi-wire-reserved.out"
+  invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warnings-abc' "$output" || return 1
+  invoke_state_helper codex_reserved_proof_dir 'security-warnings-abc' "$output" || return 1
+  if invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warningsx' "$output"; then return 1; fi
+  if invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warnings' "$output"; then return 1; fi
+}
+
+test_subagent_helper_kimi_floor_boundary() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-floor-boundary.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  # Freeze the predicate's clock so the 2999 ms main-side case cannot race
+  # the write-to-check delay across the 3000 ms floor.
+  if env HOME="$TMP_ROOT/home" bash -c '
+    . "$1"
+    fake_now=$(( $(date +%s%N) / 1000000 ))
+    date() {
+      if [ "${1:-}" = "+%s%N" ]; then printf "%s\n" "$(( fake_now * 1000000 ))"
+      else command date "$@"; fi
+    }
+    mkdir -p "$(dirname "$2")"
+    printf "%s\n" "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1784381699557}" >"$2"
+    printf "%s\n" "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\",\"uuid\":\"tool_kimiopen\",\"turnId\":\"1\",\"step\":1,\"stepUuid\":\"step-uuid\",\"toolCallId\":\"tool_kimiopen\",\"name\":\"Agent\",\"args\":{\"description\":\"probe\",\"prompt\":\"probe\"}},\"time\":$(( fake_now - 2999 ))}" >>"$2"
+    codex_hook_is_subagent_context "$3"
+  ' bash "$ROOT/hooks/lib/codex-proof-state.sh" "$wire" "$input" \
+      >"$output" 2>"$output.err"; then
+    return 1
+  fi
+
+  write_kimi_main_wire "$wire" Agent no 3000 || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+}
+
+test_stop_gate_kimi_floor_legacy_marker() {
+  local proof_root repo dir wire input out
+  proof_root="$(fresh_proof_root stop-kimi-floor-legacy)"
+  repo="$(make_git_repo stop-kimi-floor-legacy)" || return 1
+  mkdir -p "$proof_root/pre-reviewer" || return 1
+  {
+    printf 'scope: legacy test\n'
+    printf 'cwd: %s\n' "$repo"
+    printf 'session_id: pre-reviewer\n'
+  } >"$proof_root/pre-reviewer/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  input="$TMP_ROOT/stop-kimi-floor-legacy.json"
+  jq --arg cwd "$repo" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-floor-legacy.out"
+
+  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/pre-reviewer/eci_active" || return 1
+
+  write_kimi_main_wire "$wire" Agent no 3500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true"
+}
+
+test_stop_gate_kimi_own_marker_blocks_any_age() {
+  local proof_root dir wire input out
+  proof_root="$(fresh_proof_root stop-kimi-own-marker)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  input="$TMP_ROOT/stop-kimi-own-marker.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-own-marker.out"
+
+  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active" || return 1
+
+  write_kimi_main_wire "$wire" Agent no 3500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active"
+}
+
+test_stop_gate_kimi_wire_warnings_note() {
+  local proof_root input out warn
+  proof_root="$(fresh_proof_root stop-kimi-warn-note)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+  warn="$proof_root/kimi-wire-warnings-session_kimi-probe.jsonl"
+
+  input="$TMP_ROOT/stop-kimi-warn-note.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-warn-note.out"
+
+  printf '%s\n' '{"kind":"wire-protocol-mismatch","session_id":"session_kimi-probe","utc":"2026-07-18T00:00:00Z"}' >"$warn" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$warn" || return 1
+
+  rm -f "$warn" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_not_contains "$out" '.reason // empty' "kimi-wire-warnings"
 }
 
 write_main_transcript() {
@@ -7322,6 +7479,20 @@ run_case "ECI gate denies kimi main context batched shape" \
   test_eci_active_gate_kimi_main_context_denies
 run_case "ECI gate allows kimi payload without marker" \
   test_eci_active_gate_kimi_no_marker_allows
+run_case "subagent helper kimi protocol warning channel isolation" \
+  test_subagent_helper_kimi_protocol_warning_channel_isolation
+run_case "subagent helper kimi protocol warning creates proof root" \
+  test_subagent_helper_kimi_protocol_warning_mkdir
+run_case "kimi wire warnings dir is reserved" \
+  test_subagent_helper_kimi_wire_warnings_reserved_glob
+run_case "subagent helper kimi floor boundary 2999 vs 3000" \
+  test_subagent_helper_kimi_floor_boundary
+run_case "stop gate kimi floor with legacy marker" \
+  test_stop_gate_kimi_floor_legacy_marker
+run_case "stop gate kimi own marker blocks any age" \
+  test_stop_gate_kimi_own_marker_blocks_any_age
+run_case "stop gate block reason names kimi wire warnings file" \
+  test_stop_gate_kimi_wire_warnings_note
 run_case "ECI gate allows spawned-agent transcript payload" \
   test_eci_gate_allows_spawned_agent_transcript_payload
 run_case "ECI gate blocks main transcript payload" \

@@ -102,7 +102,12 @@ block_if_eci_active_for_stop() {
     json_continue
     return 0
   fi
-  json_block "ECI is active for this stop attempt via marker $marker. Never stop until the ECI task is complete. Continue the ECI task, update the session project-understanding ledger, or use blocker-resolution-protocol before reporting a blocker requiring user input while ECI remains active. Disengage only with clean-pass or user-closed via ~/.kimi-code/bin/eci-active off <disengage-report.md>."
+  local warn_note=""
+  if codex_valid_session_id "$session_id" &&
+    [ -f "$root/kimi-wire-warnings-$session_id.jsonl" ]; then
+    warn_note=" Recorded kimi-wire security warnings: $root/kimi-wire-warnings-$session_id.jsonl."
+  fi
+  json_block "ECI is active for this stop attempt via marker $marker. Never stop until the ECI task is complete. Continue the ECI task, update the session project-understanding ledger, or use blocker-resolution-protocol before reporting a blocker requiring user input while ECI remains active. Disengage only with clean-pass or user-closed via ~/.kimi-code/bin/eci-active off <disengage-report.md>.$warn_note"
   return 0
 }
 
