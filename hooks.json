@@ -66,6 +66,11 @@
           },
           {
             "type": "command",
+            "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/go-skill-gate.sh\"'",
+            "statusMessage": "Checking go-coding-style skill load"
+          },
+          {
+            "type": "command",
             "command": "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-pre-reviewer.sh\"'",
             "timeout": 75,
             "statusMessage": "Checking first tool call"

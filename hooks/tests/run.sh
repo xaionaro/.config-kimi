@@ -6661,6 +6661,154 @@ test_audit_sync_checker_fails_when_synced_file_missing() {
   [ "$status" -ne 0 ] &&
     grep -q "missing required file" "$out.err"
 }
+# ---- go-skill-gate tests ----
+
+go_gate_input() {
+  local dst="$1" tool="$2" session="$3" file="$4"
+  jq -n --arg tool "$tool" --arg file "$file" --arg session "$session" \
+    '{session_id:$session, tool_name:$tool, tool_input:{file_path:$file, old_string:"a", new_string:"b", content:"x"}}' >"$dst"
+}
+
+go_gate_wire() {
+  local id="$1" agent="$2"
+  local dir="$TMP_ROOT/home/.kimi-code/sessions/wd_gate_$id/session_$id/agents/$agent"
+  mkdir -p "$dir" || return 1
+  printf '%s\n' '{"type":"metadata","protocol_version":"1.4"}' >"$dir/wire.jsonl"
+  printf '%s\n' "$dir/wire.jsonl"
+}
+
+go_gate_skill_record() {
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Skill","args":{"skill":"go-coding-style"},"display":{"kind":"skill_call","skill_name":"go-coding-style"}}}'
+}
+
+
+
+test_go_skill_gate_allows_non_go_path() {
+  local input out
+  input="$TMP_ROOT/go-gate-nongo.json"
+  go_gate_input "$input" Edit session_nongo docs/readme.md || return 1
+  out="$TMP_ROOT/go-gate-nongo.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_denies_go_edit_before_skill_load() {
+  local input out wire
+  wire="$(go_gate_wire edit main)" || return 1
+  input="$TMP_ROOT/go-gate-edit.json"
+  go_gate_input "$input" Edit session_edit pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-edit.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out" &&
+    json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason' 'go-coding-style'
+}
+
+test_go_skill_gate_denies_go_write_before_skill_load() {
+  local input out wire
+  wire="$(go_gate_wire write main)" || return 1
+  input="$TMP_ROOT/go-gate-write.json"
+  go_gate_input "$input" Write session_write pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-write.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out" &&
+    json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason' 'go-coding-style'
+}
+
+test_go_skill_gate_allows_go_after_skill_load() {
+  local input out wire
+  wire="$(go_gate_wire loaded main)" || return 1
+  go_gate_skill_record >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-loaded.json"
+  go_gate_input "$input" Edit session_loaded pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-loaded.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_allows_go_when_record_in_other_agent_wire() {
+  local input out wire main_wire
+  main_wire="$(go_gate_wire other main)" || return 1
+  wire="$(go_gate_wire other agent-0)" || return 1
+  go_gate_skill_record >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-other.json"
+  go_gate_input "$input" Edit session_other pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-other.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_fails_open_on_missing_session_dir() {
+  local input out
+  input="$TMP_ROOT/go-gate-missing.json"
+  go_gate_input "$input" Edit session_missing pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-missing.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_fails_open_on_invalid_session_id() {
+  local input out
+  input="$TMP_ROOT/go-gate-invalid.json"
+  go_gate_input "$input" Edit '../escape' pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-invalid.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_tolerates_malformed_wire() {
+  local input out wire
+  wire="$(go_gate_wire malformed main)" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","na' >>"$wire" || return 1
+  printf '%s' '{"truncated":' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-malformed.json"
+  go_gate_input "$input" Edit session_malformed pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-malformed.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out" && [ ! -s "$out.err" ]
+}
+
+test_go_skill_gate_ignores_other_skills() {
+  local input out wire
+  wire="$(go_gate_wire otherSkill main)" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Skill","args":{"skill":"harness-tuning"},"display":{"kind":"skill_call","skill_name":"harness-tuning"}}}' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-other-skill.json"
+  go_gate_input "$input" Edit session_otherSkill pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-other-skill.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_rejects_escaped_text_mention() {
+  local input out wire
+  wire="$(go_gate_wire escaped main)" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"message","text":"discussed \"name\":\"Skill\" and \"skill\":\"go-coding-style\" in prose"}}' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-escaped.json"
+  go_gate_input "$input" Edit session_escaped pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-escaped.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_ignores_gomod() {
+  local input out
+  input="$TMP_ROOT/go-gate-gomod.json"
+  go_gate_input "$input" Edit session_gomod go.mod || return 1
+  out="$TMP_ROOT/go-gate-gomod.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
 
 run_case "prompt state is silent and records HEAD" \
   test_prompt_state_is_silent_records_head_and_clears_bypass
@@ -7336,6 +7484,17 @@ run_case "audit sync checker detects drift" \
   test_audit_sync_checker_detects_drift
 run_case "audit sync checker fails when synced files are missing" \
   test_audit_sync_checker_fails_when_synced_file_missing
+run_case "go skill gate allows non-go path" test_go_skill_gate_allows_non_go_path
+run_case "go skill gate denies go edit before skill load" test_go_skill_gate_denies_go_edit_before_skill_load
+run_case "go skill gate denies go write before skill load" test_go_skill_gate_denies_go_write_before_skill_load
+run_case "go skill gate allows go after skill load" test_go_skill_gate_allows_go_after_skill_load
+run_case "go skill gate allows go when record in other agent wire" test_go_skill_gate_allows_go_when_record_in_other_agent_wire
+run_case "go skill gate fails open on missing session dir" test_go_skill_gate_fails_open_on_missing_session_dir
+run_case "go skill gate fails open on invalid session id" test_go_skill_gate_fails_open_on_invalid_session_id
+run_case "go skill gate tolerates malformed wire" test_go_skill_gate_tolerates_malformed_wire
+run_case "go skill gate ignores other skills" test_go_skill_gate_ignores_other_skills
+run_case "go skill gate rejects escaped text mention" test_go_skill_gate_rejects_escaped_text_mention
+run_case "go skill gate ignores gomod" test_go_skill_gate_ignores_gomod
 
 if [ "$FORMAL_AVAILABLE" = 1 ]; then
   if [ -f "$profile_audit" ] &&
