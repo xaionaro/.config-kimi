@@ -41,9 +41,13 @@ for wire in "${wires[@]}"; do
   # whose spanned region contains invalid bytes, which would false-deny;
   # test_go_skill_gate_allows_with_invalid_byte_in_record_line pins this.
   # Anchored to the tool.call record with "name":"Skill","args": adjacency
-  # so snapshot lines and nested/unescaped mentions cannot false-pass;
-  # test_go_skill_gate_denies_nested_mention_in_tool_call pins the nested
-  # case. Byte-order coupled to the wire format; the real-wire drift probe
+  # so snapshot lines and nested mentions without that exact adjacency
+  # cannot false-pass; test_go_skill_gate_denies_nested_mention_in_tool_call
+  # pins that nested case. Residual accepted hole: a nested unescaped
+  # mention reproducing the full "name":"Skill","args":{"skill":"go-coding-style"
+  # byte sequence inside another tool.call still false-passes; closing it
+  # needs JSON parsing in a deliberately fail-open, grep-only gate.
+  # Byte-order coupled to the wire format; the real-wire drift probe
   # and go_gate_real_skill_record pin a byte-exact captured record —
   # update all on wire-format drift.
   if LC_ALL=C grep -qE '"type":"tool[.]call".*"name":"Skill","args":\{"skill":"go-coding-style"[},]' -- "$wire" 2>/dev/null; then
