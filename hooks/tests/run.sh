@@ -1177,10 +1177,15 @@ write_kimi_main_wire() {
   local path="$1"
   local name="${2:-Agent}"
   local close="${3:-no}"
+  local age_ms="${4:-}"
+  local time_field=""
   mkdir -p "$(dirname "$path")" || return 1
+  if [ -n "$age_ms" ]; then
+    time_field=",\"time\":$(( $(date +%s%N) / 1000000 - age_ms ))"
+  fi
   cat >"$path" <<JSON
 {"type":"metadata","protocol_version":"1.4","created_at":1784381699557}
-{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"$name","args":{"description":"probe","prompt":"probe"}}}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"$name","args":{"description":"probe","prompt":"probe"}}$time_field}
 JSON
   if [ "$close" = yes ]; then
     printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_kimiopen","toolCallId":"tool_kimiopen","result":{"output":"done"}}}' >>"$path" || return 1
@@ -1194,13 +1199,16 @@ test_subagent_helper_kimi_open_agent_call() {
   output="$TMP_ROOT/kimi-open-agent.out"
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
-  write_kimi_main_wire "$wire" || return 1
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
   invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
 
-  write_kimi_main_wire "$wire" AgentSwarm || return 1
+  write_kimi_main_wire "$wire" AgentSwarm no 5000 || return 1
   invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
 
-  write_kimi_main_wire "$wire" || return 1
+  write_kimi_main_wire "$wire" Agent yes 5000 || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_other","toolCallId":"tool_other","result":{"output":"x"}}}' >>"$wire" || return 1
   invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
 }
@@ -1240,23 +1248,91 @@ JSON
 
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
   write_kimi_main_wire "$wire" || return 1
-  touch -d '1 hour ago' "$wire" || return 1
   if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
 }
 
-# Large-wire regression fixture: the uutils-comm dual-pipe race only
-# materializes on real-size wires, so model one (metadata line, 100 closed
-# Agent call/result pairs interleaved with bulk string-payload records).
+test_subagent_helper_kimi_fresh_open_call_is_main() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-fresh-open.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" Agent no 500 || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+}
+
+test_subagent_helper_kimi_stale_open_call_is_main() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-stale-open.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" Agent no 25200000 || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+}
+
+test_subagent_helper_kimi_batched_sibling_unresolved_still_subagent() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-batched-sibling.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_sibling","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_sibling","name":"Write","args":{"path":"/x"}}}' >>"$wire" || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+}
+
+test_subagent_helper_kimi_background_spawn_result() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-background-spawn.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_kimiopen","toolCallId":"tool_kimiopen","result":{"output":"task_id: agent-x0bg\nstatus: running\nagent_id: agent-0"}}}' >>"$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+}
+
+test_subagent_helper_kimi_protocol_mismatch_warns() {
+  local dir wire input output warn
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-protocol-mismatch.out"
+  warn="$TMP_ROOT/home/.cache/kimi-proof/security-warnings-session_kimi-probe.json"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  mkdir -p "$(dirname "$wire")" "$TMP_ROOT/home/.cache/kimi-proof" || return 1
+  cat >"$wire" <<'JSON' || return 1
+{"type":"metadata","protocol_version":"9.9","created_at":1784381699557}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":1}
+JSON
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  [ -f "$warn" ] || return 1
+  [ "$(wc -l <"$warn")" -eq 1 ] || return 1
+  grep -qF '"kind":"wire-protocol-mismatch"' "$warn" || return 1
+
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  [ "$(wc -l <"$warn")" -eq 1 ]
+}
+
+# Large-wire regression fixture: model a real-size wire (metadata line, 100
+# closed Agent call/result pairs with "time" fields interleaved with bulk
+# string-payload records) so the single-pass awk scan sees realistic input.
 write_kimi_main_wire_large() {
   local path="$1"
-  local i pad
+  local i pad now_ms
   mkdir -p "$(dirname "$path")" || return 1
   pad=$(printf '%01024d' 0) || return 1
+  now_ms=$(( $(date +%s%N) / 1000000 ))
   printf '%s\n' '{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}' >"$path" || return 1
   i=1
   while [ "$i" -le 100 ]; do
     printf '{"type":"content.part","part":{"type":"text","text":"bulk-%s-%s"}}\n' "$i" "$pad" >>"$path" || return 1
-    printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_bulk%s","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_bulk%s","name":"Agent","args":{"description":"probe","prompt":"probe"}}}\n' "$i" "$i" >>"$path" || return 1
+    printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_bulk%s","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_bulk%s","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$i" "$i" "$now_ms" >>"$path" || return 1
     printf '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_bulk%s","toolCallId":"tool_bulk%s","result":{"output":"done"}}}\n' "$i" "$i" >>"$path" || return 1
     i=$((i + 1))
   done
@@ -1279,17 +1355,70 @@ test_subagent_helper_kimi_large_wire_all_closed() {
 }
 
 test_subagent_helper_kimi_large_wire_one_open() {
-  local dir wire input output
+  local dir wire input output now_ms
   dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
   wire="$dir/agents/main/wire.jsonl"
   output="$TMP_ROOT/kimi-large-open.out"
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   write_kimi_main_wire_large "$wire" || return 1
-  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_closed","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_closed","name":"Agent","args":{"description":"probe","prompt":"probe"}}}' >>"$wire" || return 1
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+  printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_closed","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_closed","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$now_ms" >>"$wire" || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_tail_closed","toolCallId":"tool_tail_closed","result":{"output":"done"}}}' >>"$wire" || return 1
-  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_open","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_open","name":"AgentSwarm","args":{"description":"probe","prompt":"probe"}}}' >>"$wire" || return 1
+  printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_open","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_open","name":"AgentSwarm","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$(( now_ms - 5000 ))" >>"$wire" || return 1
   invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+}
+
+test_eci_active_gate_kimi_subagent_context_allows() {
+  local proof_root dir wire input out
+  proof_root="$(fresh_proof_root eci-kimi-subagent)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
+  input="$TMP_ROOT/eci-kimi-subagent.json"
+  jq '.session_id = "session_kimi-probe"' "$FIXTURES/eci-apply-patch-code.json" >"$input"
+  out="$TMP_ROOT/eci-kimi-subagent.out"
+
+  run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+
+  expect_no_output "$out"
+}
+
+test_eci_active_gate_kimi_main_context_denies() {
+  local proof_root dir wire input out
+  proof_root="$(fresh_proof_root eci-kimi-main)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 500 || return 1
+  input="$TMP_ROOT/eci-kimi-main.json"
+  jq '.session_id = "session_kimi-probe"' "$FIXTURES/eci-apply-patch-code.json" >"$input"
+  out="$TMP_ROOT/eci-kimi-main.out"
+
+  run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+
+  is_pretool_deny "$out"
+}
+
+test_eci_active_gate_kimi_no_marker_allows() {
+  local proof_root dir wire input out
+  proof_root="$(fresh_proof_root eci-kimi-no-marker)"
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
+  input="$TMP_ROOT/eci-kimi-no-marker.json"
+  jq '.session_id = "session_kimi-probe"' "$FIXTURES/eci-apply-patch-code.json" >"$input"
+  out="$TMP_ROOT/eci-kimi-no-marker.out"
+
+  run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+
+  expect_no_output "$out"
 }
 
 write_main_transcript() {
@@ -7177,6 +7306,22 @@ run_case "subagent helper kimi large wire all closed stays main" \
   test_subagent_helper_kimi_large_wire_all_closed
 run_case "subagent helper kimi large wire one open call is subagent" \
   test_subagent_helper_kimi_large_wire_one_open
+run_case "subagent helper kimi fresh open call is main" \
+  test_subagent_helper_kimi_fresh_open_call_is_main
+run_case "subagent helper kimi stale open call is main" \
+  test_subagent_helper_kimi_stale_open_call_is_main
+run_case "subagent helper kimi batched sibling unresolved still subagent" \
+  test_subagent_helper_kimi_batched_sibling_unresolved_still_subagent
+run_case "subagent helper kimi background spawn result is main" \
+  test_subagent_helper_kimi_background_spawn_result
+run_case "subagent helper kimi protocol mismatch warns once" \
+  test_subagent_helper_kimi_protocol_mismatch_warns
+run_case "ECI gate allows kimi subagent context" \
+  test_eci_active_gate_kimi_subagent_context_allows
+run_case "ECI gate denies kimi main context batched shape" \
+  test_eci_active_gate_kimi_main_context_denies
+run_case "ECI gate allows kimi payload without marker" \
+  test_eci_active_gate_kimi_no_marker_allows
 run_case "ECI gate allows spawned-agent transcript payload" \
   test_eci_gate_allows_spawned_agent_transcript_payload
 run_case "ECI gate blocks main transcript payload" \

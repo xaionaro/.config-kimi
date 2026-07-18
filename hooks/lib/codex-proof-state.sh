@@ -451,18 +451,31 @@ codex_hook_is_subagent_context() {
 # Kimi-native subagent detection. Kimi hook payloads carry no transcript_path
 # and no agent identity; main and subagent calls share one session_id, and the
 # caller's own tool.call record is appended to its wire only after PreToolUse
-# hooks complete, so tool_call_id lookups cannot identify the caller at gate
-# time (verified 2026-07-18: 8/8 captured PreToolUse fires across 4 sessions
-# had no wire record yet). What identifies the context is the main wire's open
-# Agent/AgentSwarm calls: a foreground spawned agent holds an open tool.call
-# (no matching tool.result) in agents/main/wire.jsonl for its entire run, and
-# the main loop cannot issue its own tool calls while blocked inside it.
-# Background agents close their call record at spawn, and missing or
-# unparseable signals return main-context (return 1), keeping deny-gates
-# fail-closed. Matching is textual: a non-Agent call whose raw args payload
-# embeds the literal "name":"Agent" substring also contributes its toolCallId;
-# the false positive is benign and self-corrects when that call's own
-# tool.result lands.
+# hooks complete (verified 2026-07-18: 8/8 captured fires across 4 sessions
+# had no wire record yet). Context is identified by the main wire's open
+# Agent/AgentSwarm calls and their age:
+#  - A foreground spawned agent holds an open tool.call (no tool.result) in
+#    agents/main/wire.jsonl for its entire run; main, blocked inside it,
+#    cannot emit further calls — except batched with the spawn: a batched
+#    [Agent, X] step fires X's hook with the Agent call open (main wire of
+#    session_a3d9d20a lines 940-941: Agent t=1784403893266, Write
+#    t=1784403893953, same stepUuid, 687 ms gap).
+#  - A batched sibling's hook fires <1 s after the Agent record; a real
+#    subagent's first tool fires seconds after spawn (min observed
+#    spawn-to-first-tool-call 7768 ms across 12 agents in session_a3d9d20a;
+#    min nonzero ttftMs 2856 ms in its log). The 2000 ms freshness floor
+#    separates the two. The 6 h ceiling (10x the longest observed live run,
+#    36.8 min) rejects stale open calls; session resume synthesizes
+#    interruption results for crash orphans (session_d56600db), so a live
+#    session cannot legitimately hold one.
+# Background agents close their call record at spawn ("status: running"
+# result), so their edits classify as main (denied under a marker): a
+# documented fail-closed limitation; ECI/ATE under a marker must use
+# foreground agents. Missing or unparseable signals return main-context
+# (return 1), keeping deny-gates fail-closed. Matching is textual: a
+# non-Agent call whose raw args embed the literal "name":"Agent" substring
+# also contributes its toolCallId; the false positive is benign and
+# self-corrects when that call's own tool.result lands.
 codex_hook_kimi_session_dir() {
   local sid="$1" root="$HOME/.kimi-code/sessions" d
   case "$sid" in
@@ -476,8 +489,19 @@ codex_hook_kimi_session_dir() {
   return 1
 }
 
+codex_kimi_wire_security_warning() {
+  local sid="$1" kind="$2" file
+  codex_valid_session_id "$sid" || return 0
+  file="$(codex_proof_root)/security-warnings-$sid.json"
+  if [ -f "$file" ] && grep -qF "\"$kind\"" "$file" 2>/dev/null; then
+    return 0
+  fi
+  printf '{"kind":"%s","session_id":"%s","utc":"%s"}\n' \
+    "$kind" "$sid" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$file" 2>/dev/null || true
+}
+
 codex_hook_is_subagent_context_kimi() {
-  local input="${1:-}" sid session_dir wire calls results open mtime
+  local input="${1:-}" sid session_dir wire now_ms
 
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
   [ -n "$sid" ] || return 1
@@ -485,22 +509,39 @@ codex_hook_is_subagent_context_kimi() {
   wire="$session_dir/agents/main/wire.jsonl"
   [ -f "$wire" ] || return 1
 
-  # Staleness backstop: a live foreground agent blocks the main loop, so the
-  # main wire is unwritten for the agent's whole run; agents time out at 30
-  # min, so no live agent can exist in a wire unwritten for >45 min.
-  mtime=$(stat -c %Y "$wire" 2>/dev/null) || return 1
-  [ $(( $(date +%s) - mtime )) -le 2700 ] || return 1
+  # Format canary: unknown wire protocol → fail closed + warn once per kind.
+  if ! head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"'; then
+    codex_kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
+    return 1
+  fi
 
-  calls=$(grep -F '"event":{"type":"tool.call"' "$wire" 2>/dev/null |
-    grep -E '"name":"(Agent|AgentSwarm)"' |
-    grep -oE '"toolCallId":"[^"]+"' | sort -u) || true
-  [ -n "$calls" ] || return 1
-  results=$(grep -F '"event":{"type":"tool.result"' "$wire" 2>/dev/null |
-    grep -oE '"toolCallId":"[^"]+"' | sort -u) || true
-  # uutils comm 0.2.2 corrupts dual process-substitution input; awk is exact.
-  open=$(awk 'NR==FNR{seen[$0]=1;next} !seen[$0]' \
-    <(printf '%s\n' "$results") <(printf '%s\n' "$calls")) || return 1
-  [ -n "$open" ]
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+  awk -v now="$now_ms" '
+    index($0, "\"event\":{\"type\":\"tool.call\"") &&
+      (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
+      id = ""; t = ""
+      if (match($0, /"toolCallId":"[^"]+"/))
+        id = substr($0, RSTART + 14, RLENGTH - 15)
+      if (match($0, /"time":[0-9]+}[[:space:]]*$/))
+        t = substr($0, RSTART + 7, RLENGTH - 8)
+      if (id != "") open[id] = t
+      next
+    }
+    index($0, "\"event\":{\"type\":\"tool.result\"") {
+      if (match($0, /"toolCallId":"[^"]+"/))
+        delete open[substr($0, RSTART + 14, RLENGTH - 15)]
+      next
+    }
+    END {
+      found = 0
+      for (id in open) {
+        if (open[id] == "") continue          # no record time → fail closed
+        age = now - open[id]
+        if (age >= 2000 && age <= 21600000) { found = 1; break }
+      }
+      exit(found ? 0 : 1)
+    }
+  ' "$wire"
 }
 
 codex_hook_transcript_first_record_is_admissible() {
