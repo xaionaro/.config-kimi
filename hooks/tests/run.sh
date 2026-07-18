@@ -6782,6 +6782,10 @@ test_audit_sync_checker_fails_when_synced_file_missing() {
 }
 # ---- go-skill-gate tests ----
 
+# ERE of the go-coding-style Skill tool.call record; hooks/go-skill-gate.sh
+# embeds this pattern literally — test_go_skill_gate_hook_pattern_in_sync pins sync.
+GO_GATE_RECORD_ERE='"type":"tool[.]call".*"name":"Skill","args":\{"skill":"go-coding-style"[},]'
+
 go_gate_input() {
   local dst="$1" tool="$2" session="$3" file="$4"
   jq -n --arg tool "$tool" --arg file "$file" --arg session "$session" \
@@ -7001,8 +7005,8 @@ test_go_skill_gate_skips_symlinked_wire() {
 
 test_go_skill_gate_real_wire_drift_probe() {
   local missed
-  missed=$(LC_ALL=C grep -rh '"skill":"go-coding-style"' "$HOME/.kimi-code/sessions" 2>/dev/null |
-    LC_ALL=C grep -vcE '"type":"tool[.]call".*"name":"Skill".*"skill":"go-coding-style"[},]')
+  missed=$(LC_ALL=C grep -rh '"skill":"go-coding-style"' "$HOME"/.kimi-code/sessions/*/*/agents/*/wire.jsonl 2>/dev/null |
+    LC_ALL=C grep -vcE "$GO_GATE_RECORD_ERE")
   [ "$missed" -eq 0 ]
 }
 
@@ -7016,6 +7020,34 @@ test_go_skill_gate_rejects_escaped_mention_in_tool_call() {
   run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
     HOME="$TMP_ROOT/home" || return 1
   is_pretool_deny "$out"
+}
+
+test_go_skill_gate_denies_nested_mention_in_tool_call() {
+  local input out wire
+  wire="$(go_gate_wire nested main)" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Write","args":{"file_path":"x.md","example":{"name":"Skill","skill":"go-coding-style"}}}}' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-nested.json"
+  go_gate_input "$input" Edit session_nested pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-nested.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_allows_with_invalid_byte_in_record_line() {
+  local input out wire
+  wire="$(go_gate_wire invbyte main)" || return 1
+  printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"\xff","name":"Skill","args":{"skill":"go-coding-style"}}}\n' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-invbyte.json"
+  go_gate_input "$input" Edit session_invbyte pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-invbyte.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" LC_ALL=C.utf8 || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_hook_pattern_in_sync() {
+  grep -qF "$GO_GATE_RECORD_ERE" "$ROOT/hooks/go-skill-gate.sh"
 }
 
 
@@ -7717,7 +7749,10 @@ run_case "go skill gate denies snapshot shaped line" test_go_skill_gate_denies_s
 run_case "go skill gate allows when record precedes bulk skill lines" test_go_skill_gate_allows_when_record_precedes_bulk_skill_lines
 run_case "go skill gate denies when record in other session" test_go_skill_gate_denies_when_record_in_other_session
 run_case "go skill gate skips symlinked wire" test_go_skill_gate_skips_symlinked_wire
-if LC_ALL=C grep -rqh '"skill":"go-coding-style"' "$HOME/.kimi-code/sessions" 2>/dev/null; then
+run_case "go skill gate denies nested mention in tool call" test_go_skill_gate_denies_nested_mention_in_tool_call
+run_case "go skill gate allows with invalid byte in record line" test_go_skill_gate_allows_with_invalid_byte_in_record_line
+run_case "go skill gate hook pattern in sync" test_go_skill_gate_hook_pattern_in_sync
+if LC_ALL=C grep -qh '"skill":"go-coding-style"' "$HOME"/.kimi-code/sessions/*/*/agents/*/wire.jsonl 2>/dev/null; then
   run_case "go skill gate real wire drift probe" test_go_skill_gate_real_wire_drift_probe
 else
   skip "go skill gate real wire drift probe (no real go-coding-style wire records)"

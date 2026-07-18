@@ -33,15 +33,20 @@ shopt -u nullglob
 
 for wire in "${wires[@]}"; do
   [ -f "$wire" ] && [ ! -L "$wire" ] || continue
-  # Single grep, no pipeline: a producer|grep -q pipe SIGPIPEs the producer
-  # under pipefail and false-denies once >64KB of matching lines follow the
-  # record. LC_ALL=C keeps '.' byte-exact; UTF-8 locales refuse to span
-  # invalid bytes, which would false-deny. Anchored to the tool.call record
-  # so llm.tools_snapshot lines (which carry unescaped "name":"Skill")
-  # cannot false-pass. Byte-order coupled to the wire format;
-  # hooks/tests/run.sh pins a byte-exact captured record — update both on
-  # wire-format drift.
-  if LC_ALL=C grep -qE '"type":"tool[.]call".*"name":"Skill".*"skill":"go-coding-style"[},]' -- "$wire" 2>/dev/null; then
+  # Single grep, no pipeline: with a producer|grep -q pipe, grep exits on
+  # the first match and the producer dies by SIGPIPE once the pipe buffer
+  # (64KB default here) fills — timing-dependent, and under pipefail the
+  # pipeline status false-denies. LC_ALL=C keeps '.' byte-exact: on this
+  # host (GNU grep 3.11) a UTF-8 locale refuses to match a record line
+  # whose spanned region contains invalid bytes, which would false-deny;
+  # test_go_skill_gate_allows_with_invalid_byte_in_record_line pins this.
+  # Anchored to the tool.call record with "name":"Skill","args": adjacency
+  # so snapshot lines and nested/unescaped mentions cannot false-pass;
+  # test_go_skill_gate_denies_nested_mention_in_tool_call pins the nested
+  # case. Byte-order coupled to the wire format; the real-wire drift probe
+  # and go_gate_real_skill_record pin a byte-exact captured record —
+  # update all on wire-format drift.
+  if LC_ALL=C grep -qE '"type":"tool[.]call".*"name":"Skill","args":\{"skill":"go-coding-style"[},]' -- "$wire" 2>/dev/null; then
     exit 0
   fi
 done
