@@ -1173,6 +1173,77 @@ test_first_record_helpers_preserve_boundary_behavior() {
   [ ! -s "$output" ]
 }
 
+write_kimi_main_wire() {
+  local path="$1"
+  local name="${2:-Agent}"
+  local close="${3:-no}"
+  mkdir -p "$(dirname "$path")" || return 1
+  cat >"$path" <<JSON
+{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"$name","args":{"description":"probe","prompt":"probe"}}}
+JSON
+  if [ "$close" = yes ]; then
+    printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_kimiopen","toolCallId":"tool_kimiopen","result":{"output":"done"}}}' >>"$path" || return 1
+  fi
+}
+
+test_subagent_helper_kimi_open_agent_call() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-open-agent.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+
+  write_kimi_main_wire "$wire" AgentSwarm || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+
+  write_kimi_main_wire "$wire" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_other","toolCallId":"tool_other","result":{"output":"x"}}}' >>"$wire" || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+}
+
+test_subagent_helper_kimi_main_context_variants() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-main-variants.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire "$wire" Agent yes || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  cat >"$wire" <<'JSON' || return 1
+{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_plain","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_plain","name":"Write","args":{"path":"/x"}}}
+JSON
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  printf '%s\n' 'not json at all' >"$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  printf '%s' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_trunc","toolCa' >"$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  rm -f "$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  input="$(jq -cn '{session_id: "session_missing"}')"
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  if invoke_state_helper codex_hook_is_subagent_context '{}' "$output"; then return 1; fi
+
+  input="$(jq -cn '{session_id: "../session_kimi-probe"}')"
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+  write_kimi_main_wire "$wire" || return 1
+  touch -d '1 hour ago' "$wire" || return 1
+  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+}
+
 # Large-wire regression fixture: the uutils-comm dual-pipe race only
 # materializes on real-size wires, so model one (metadata line, 100 closed
 # Agent call/result pairs interleaved with bulk string-payload records).
@@ -7066,6 +7137,10 @@ run_case "first-record helpers reject oversize record without final newline" \
   test_first_record_helpers_reject_oversize_without_final_newline
 run_case "first-record helpers preserve boundary behavior" \
   test_first_record_helpers_preserve_boundary_behavior
+run_case "subagent helper detects kimi open agent call" \
+  test_subagent_helper_kimi_open_agent_call
+run_case "subagent helper kimi main-context variants fail closed" \
+  test_subagent_helper_kimi_main_context_variants
 run_case "subagent helper kimi large wire all closed stays main" \
   test_subagent_helper_kimi_large_wire_all_closed
 run_case "subagent helper kimi large wire one open call is subagent" \
