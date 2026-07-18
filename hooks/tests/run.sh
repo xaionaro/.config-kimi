@@ -1173,6 +1173,54 @@ test_first_record_helpers_preserve_boundary_behavior() {
   [ ! -s "$output" ]
 }
 
+# Large-wire regression fixture: the uutils-comm dual-pipe race only
+# materializes on real-size wires, so model one (metadata line, 100 closed
+# Agent call/result pairs interleaved with bulk string-payload records).
+write_kimi_main_wire_large() {
+  local path="$1"
+  local i pad
+  mkdir -p "$(dirname "$path")" || return 1
+  pad=$(printf '%01024d' 0) || return 1
+  printf '%s\n' '{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}' >"$path" || return 1
+  i=1
+  while [ "$i" -le 100 ]; do
+    printf '{"type":"content.part","part":{"type":"text","text":"bulk-%s-%s"}}\n' "$i" "$pad" >>"$path" || return 1
+    printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_bulk%s","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_bulk%s","name":"Agent","args":{"description":"probe","prompt":"probe"}}}\n' "$i" "$i" >>"$path" || return 1
+    printf '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_bulk%s","toolCallId":"tool_bulk%s","result":{"output":"done"}}}\n' "$i" "$i" >>"$path" || return 1
+    i=$((i + 1))
+  done
+  [ "$(stat -c %s "$path")" -ge 102400 ]
+}
+
+test_subagent_helper_kimi_large_wire_all_closed() {
+  local dir wire input output i
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-large-closed.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire_large "$wire" || return 1
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+    i=$((i + 1))
+  done
+}
+
+test_subagent_helper_kimi_large_wire_one_open() {
+  local dir wire input output
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  output="$TMP_ROOT/kimi-large-open.out"
+  input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
+
+  write_kimi_main_wire_large "$wire" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_closed","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_closed","name":"Agent","args":{"description":"probe","prompt":"probe"}}}' >>"$wire" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_tail_closed","toolCallId":"tool_tail_closed","result":{"output":"done"}}}' >>"$wire" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_open","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_open","name":"AgentSwarm","args":{"description":"probe","prompt":"probe"}}}' >>"$wire" || return 1
+  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+}
+
 write_main_transcript() {
   local path="$1"
   mkdir -p "$(dirname "$path")" || return 1
@@ -6928,6 +6976,10 @@ run_case "first-record helpers reject oversize record without final newline" \
   test_first_record_helpers_reject_oversize_without_final_newline
 run_case "first-record helpers preserve boundary behavior" \
   test_first_record_helpers_preserve_boundary_behavior
+run_case "subagent helper kimi large wire all closed stays main" \
+  test_subagent_helper_kimi_large_wire_all_closed
+run_case "subagent helper kimi large wire one open call is subagent" \
+  test_subagent_helper_kimi_large_wire_one_open
 run_case "ECI gate allows spawned-agent transcript payload" \
   test_eci_gate_allows_spawned_agent_transcript_payload
 run_case "ECI gate blocks main transcript payload" \

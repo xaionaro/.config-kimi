@@ -448,13 +448,21 @@ codex_hook_is_subagent_context() {
   codex_hook_is_subagent_context_kimi "$input"
 }
 
-# Kimi-native subagent detection. Kimi hook payloads carry no transcript_path;
-# they carry session_id and tool_call_id. The caller's tool.call record is
-# appended to its own agents/<id>/wire.jsonl before PreToolUse hooks run
-# (denied calls are recorded too), so the wire file containing the id
-# identifies the calling agent. Unknown lookups default to main (return 1);
-# a rare async-flush race can misclassify a subagent call as main, never the
-# reverse, which keeps deny-gates fail-closed.
+# Kimi-native subagent detection. Kimi hook payloads carry no transcript_path
+# and no agent identity; main and subagent calls share one session_id, and the
+# caller's own tool.call record is appended to its wire only after PreToolUse
+# hooks complete, so tool_call_id lookups cannot identify the caller at gate
+# time (verified 2026-07-18: 8/8 captured PreToolUse fires across 4 sessions
+# had no wire record yet). What identifies the context is the main wire's open
+# Agent/AgentSwarm calls: a foreground spawned agent holds an open tool.call
+# (no matching tool.result) in agents/main/wire.jsonl for its entire run, and
+# the main loop cannot issue its own tool calls while blocked inside it.
+# Background agents close their call record at spawn, and missing or
+# unparseable signals return main-context (return 1), keeping deny-gates
+# fail-closed. Matching is textual: a non-Agent call whose raw args payload
+# embeds the literal "name":"Agent" substring also contributes its toolCallId;
+# the false positive is benign and self-corrects when that call's own
+# tool.result lands.
 codex_hook_kimi_session_dir() {
   local sid="$1" root="$HOME/.kimi-code/sessions" d
   case "$sid" in
@@ -469,27 +477,30 @@ codex_hook_kimi_session_dir() {
 }
 
 codex_hook_is_subagent_context_kimi() {
-  local input="${1:-}" sid tcid session_dir wire
+  local input="${1:-}" sid session_dir wire calls results open mtime
 
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
-  tcid=$(printf '%s' "$input" | jq -r '.tool_call_id // empty' 2>/dev/null) || return 1
-  [ -n "$sid" ] && [ -n "$tcid" ] || return 1
+  [ -n "$sid" ] || return 1
   session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
+  wire="$session_dir/agents/main/wire.jsonl"
+  [ -f "$wire" ] || return 1
 
-  if [ -f "$session_dir/agents/main/wire.jsonl" ] && \
-    grep -Fq "$tcid" "$session_dir/agents/main/wire.jsonl" 2>/dev/null; then
-    return 1
-  fi
-  for wire in "$session_dir"/agents/*/wire.jsonl; do
-    [ -f "$wire" ] || continue
-    case "$wire" in
-      */agents/main/wire.jsonl) continue ;;
-    esac
-    if grep -Fq "$tcid" "$wire" 2>/dev/null; then
-      return 0
-    fi
-  done
-  return 1
+  # Staleness backstop: a live foreground agent blocks the main loop, so the
+  # main wire is unwritten for the agent's whole run; agents time out at 30
+  # min, so no live agent can exist in a wire unwritten for >45 min.
+  mtime=$(stat -c %Y "$wire" 2>/dev/null) || return 1
+  [ $(( $(date +%s) - mtime )) -le 2700 ] || return 1
+
+  calls=$(grep -F '"event":{"type":"tool.call"' "$wire" 2>/dev/null |
+    grep -E '"name":"(Agent|AgentSwarm)"' |
+    grep -oE '"toolCallId":"[^"]+"' | sort -u) || true
+  [ -n "$calls" ] || return 1
+  results=$(grep -F '"event":{"type":"tool.result"' "$wire" 2>/dev/null |
+    grep -oE '"toolCallId":"[^"]+"' | sort -u) || true
+  # uutils comm 0.2.2 corrupts dual process-substitution input; awk is exact.
+  open=$(awk 'NR==FNR{seen[$0]=1;next} !seen[$0]' \
+    <(printf '%s\n' "$results") <(printf '%s\n' "$calls")) || return 1
+  [ -n "$open" ]
 }
 
 codex_hook_transcript_first_record_is_admissible() {
