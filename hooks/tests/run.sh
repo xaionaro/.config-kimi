@@ -6729,6 +6729,10 @@ go_gate_skill_record() {
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Skill","args":{"skill":"go-coding-style"},"display":{"kind":"skill_call","skill_name":"go-coding-style"}}}'
 }
 
+# captured verbatim 2026-07-18 from sessions/wd_avpipeline_2da131a6cf35/session_ef7aa60e-f9e3-4743-936e-6cc075949adf/agents/agent-0/wire.jsonl:32; update on wire-format drift
+go_gate_real_skill_record() {
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_RSE2EsvYNz9xt9yUHYmwyull","turnId":"0","step":3,"stepUuid":"d900a062-1287-4108-b92b-b47ed978def5","toolCallId":"tool_RSE2EsvYNz9xt9yUHYmwyull","name":"Skill","args":{"skill":"go-coding-style"},"description":"Invoke skill go-coding-style","display":{"kind":"skill_call","skill_name":"go-coding-style"},"traceId":"80e114ead73c131bfc65455c5a3b61d5"},"time":1784377317422}'
+}
 
 
 test_go_skill_gate_allows_non_go_path() {
@@ -6855,6 +6859,92 @@ test_go_skill_gate_ignores_gomod() {
   run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
     HOME="$TMP_ROOT/home" || return 1
   expect_no_output "$out"
+}
+
+test_go_skill_gate_allows_real_captured_record_line() {
+  local input out wire
+  wire="$(go_gate_wire realrec main)" || return 1
+  go_gate_real_skill_record >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-realrec.json"
+  go_gate_input "$input" Edit session_realrec pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-realrec.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_denies_snapshot_shaped_line() {
+  local input out wire
+  wire="$(go_gate_wire snapshot main)" || return 1
+  printf '%s\n' '{"type":"llm.tools_snapshot","tools":[{"name":"Skill","example":{"skill":"go-coding-style"}}]}' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-snapshot.json"
+  go_gate_input "$input" Edit session_snapshot pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-snapshot.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_allows_when_record_precedes_bulk_skill_lines() {
+  local input out wire pad i
+  wire="$(go_gate_wire bulk main)" || return 1
+  go_gate_skill_record >>"$wire" || return 1
+  pad=$(printf 'pad%.0s' $(seq 1 60)) || return 1
+  for i in $(seq 1 2000); do
+    printf '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Skill","args":{"skill":"harness-tuning"},"display":{"kind":"skill_call","skill_name":"harness-tuning"},"bulk":"%s-%d"}}\n' "$pad" "$i" >>"$wire" || return 1
+  done
+  input="$TMP_ROOT/go-gate-bulk.json"
+  go_gate_input "$input" Edit session_bulk pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-bulk.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  expect_no_output "$out"
+}
+
+test_go_skill_gate_denies_when_record_in_other_session() {
+  local input out wire_a wire_b
+  wire_a="$(go_gate_wire xsesA main)" || return 1
+  go_gate_skill_record >>"$wire_a" || return 1
+  wire_b="$(go_gate_wire xsesB main)" || return 1
+  input="$TMP_ROOT/go-gate-xses.json"
+  go_gate_input "$input" Edit session_xsesB pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-xses.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_skips_symlinked_wire() {
+  local input out wire target
+  wire="$(go_gate_wire symlink main)" || return 1
+  target="$TMP_ROOT/go-gate-symlink-target.jsonl"
+  go_gate_skill_record >"$target" || return 1
+  rm "$wire" && ln -s "$target" "$wire" || return 1
+  input="$TMP_ROOT/go-gate-symlink.json"
+  go_gate_input "$input" Edit session_symlink pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-symlink.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
+}
+
+test_go_skill_gate_real_wire_drift_probe() {
+  local missed
+  missed=$(LC_ALL=C grep -rh '"skill":"go-coding-style"' "$HOME/.kimi-code/sessions" 2>/dev/null |
+    LC_ALL=C grep -vcE '"type":"tool[.]call".*"name":"Skill".*"skill":"go-coding-style"[},]')
+  [ "$missed" -eq 0 ]
+}
+
+test_go_skill_gate_rejects_escaped_mention_in_tool_call() {
+  local input out wire
+  wire="$(go_gate_wire esctc main)" || return 1
+  printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Write","args":{"file_path":"notes.md","content":"see \"name\":\"Skill\" \"skill\":\"go-coding-style\""}}}' >>"$wire" || return 1
+  input="$TMP_ROOT/go-gate-esctc.json"
+  go_gate_input "$input" Edit session_esctc pkg/main.go || return 1
+  out="$TMP_ROOT/go-gate-esctc.out"
+  run_hook "$out" "$ROOT/hooks/go-skill-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" || return 1
+  is_pretool_deny "$out"
 }
 
 
@@ -7547,6 +7637,17 @@ run_case "go skill gate tolerates malformed wire" test_go_skill_gate_tolerates_m
 run_case "go skill gate ignores other skills" test_go_skill_gate_ignores_other_skills
 run_case "go skill gate rejects escaped text mention" test_go_skill_gate_rejects_escaped_text_mention
 run_case "go skill gate ignores gomod" test_go_skill_gate_ignores_gomod
+run_case "go skill gate allows real captured record line" test_go_skill_gate_allows_real_captured_record_line
+run_case "go skill gate denies snapshot shaped line" test_go_skill_gate_denies_snapshot_shaped_line
+run_case "go skill gate allows when record precedes bulk skill lines" test_go_skill_gate_allows_when_record_precedes_bulk_skill_lines
+run_case "go skill gate denies when record in other session" test_go_skill_gate_denies_when_record_in_other_session
+run_case "go skill gate skips symlinked wire" test_go_skill_gate_skips_symlinked_wire
+if LC_ALL=C grep -rqh '"skill":"go-coding-style"' "$HOME/.kimi-code/sessions" 2>/dev/null; then
+  run_case "go skill gate real wire drift probe" test_go_skill_gate_real_wire_drift_probe
+else
+  skip "go skill gate real wire drift probe (no real go-coding-style wire records)"
+fi
+run_case "go skill gate rejects escaped mention in tool call" test_go_skill_gate_rejects_escaped_mention_in_tool_call
 
 if [ "$FORMAL_AVAILABLE" = 1 ]; then
   if [ -f "$profile_audit" ] &&

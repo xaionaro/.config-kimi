@@ -33,8 +33,15 @@ shopt -u nullglob
 
 for wire in "${wires[@]}"; do
   [ -f "$wire" ] && [ ! -L "$wire" ] || continue
-  if grep -F '"name":"Skill"' -- "$wire" 2>/dev/null |
-     grep -qE '"skill":"go-coding-style"[},]'; then
+  # Single grep, no pipeline: a producer|grep -q pipe SIGPIPEs the producer
+  # under pipefail and false-denies once >64KB of matching lines follow the
+  # record. LC_ALL=C keeps '.' byte-exact; UTF-8 locales refuse to span
+  # invalid bytes, which would false-deny. Anchored to the tool.call record
+  # so llm.tools_snapshot lines (which carry unescaped "name":"Skill")
+  # cannot false-pass. Byte-order coupled to the wire format;
+  # hooks/tests/run.sh pins a byte-exact captured record — update both on
+  # wire-format drift.
+  if LC_ALL=C grep -qE '"type":"tool[.]call".*"name":"Skill".*"skill":"go-coding-style"[},]' -- "$wire" 2>/dev/null; then
     exit 0
   fi
 done
