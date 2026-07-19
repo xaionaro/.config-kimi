@@ -201,7 +201,17 @@ formal_skip() {
 run_case() {
   local name="$1"
   shift
-  if "$@"; then
+  local result=0
+  "$@" || result=$?
+  # run_case executes tests in this same shell: a leaked frozen clock (a
+  # date override or fake_now left behind by a frozen test) would make the
+  # real-elapsed perf assertions (run.sh:2359-2370, 2877-2885, 3017-3024)
+  # measure ~0 ms and silently false-pass. Flag the leaker, then unfreeze
+  # so later tests are not skewed.
+  if [ -n "$(declare -F date)" ] || [ -n "${fake_now:-}" ]; then
+    fail "$name" "leaked frozen clock: date override or fake_now still set"
+    unfreeze_time
+  elif [ "$result" -eq 0 ]; then
     pass "$name"
   else
     fail "$name"
@@ -1052,7 +1062,9 @@ invoke_state_helper() {
 # later tests and real-elapsed perf assertions. The propagation
 # requirement (exported date function + exported fake_now) holds for both
 # env-spawn helper styles (run_hook's `env -u KIMI_ROLE bash` and
-# invoke_state_helper's `env HOME=... bash -c`).
+# invoke_state_helper's `env HOME=... bash -c`). While frozen, EVERY
+# date +%s%N consumer in the shell and its children reads fake_now, not
+# only the wire-age scan.
 freeze_time_ms() {
   fake_now="$1"
   date() {
