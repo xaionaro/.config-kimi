@@ -1043,6 +1043,25 @@ invoke_state_helper() {
 
 
 
+# Freeze wall time for wire-age-sensitive assertions: date +%s%N reports
+# fake_now until unfreeze_time runs. Both the function and fake_now are
+# exported because run_hook/invoke_state_helper spawn env -u ... bash
+# children; unexported state does not propagate.
+freeze_time_ms() {
+  fake_now="$1"
+  date() {
+    if [ "${1:-}" = "+%s%N" ]; then printf '%s\n' "$(( fake_now * 1000000 ))"
+    else command date "$@"; fi
+  }
+  export fake_now
+  export -f date
+}
+
+unfreeze_time() {
+  unset -f date
+  unset fake_now
+}
+
 write_kimi_main_wire() {
   local path="$1"
   local name="${2:-Agent}"
@@ -1128,8 +1147,10 @@ test_subagent_helper_kimi_fresh_open_call_is_main() {
   output="$TMP_ROOT/kimi-fresh-open.out"
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
-  write_kimi_main_wire "$wire" Agent no 500 || return 1
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  freeze_time_ms "$(( $(date +%s%N) / 1000000 ))"
+  write_kimi_main_wire "$wire" Agent no 500 || { unfreeze_time; return 1; }
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then unfreeze_time; return 1; fi
+  unfreeze_time
 }
 
 test_subagent_helper_kimi_stale_open_call_is_main() {
@@ -1350,21 +1371,12 @@ test_subagent_helper_kimi_floor_boundary() {
 
   # Freeze the predicate's clock so the 2999 ms main-side case cannot race
   # the write-to-check delay across the 3000 ms floor.
-  if env HOME="$TMP_ROOT/home" bash -c '
-    . "$1"
-    fake_now=$(( $(date +%s%N) / 1000000 ))
-    date() {
-      if [ "${1:-}" = "+%s%N" ]; then printf "%s\n" "$(( fake_now * 1000000 ))"
-      else command date "$@"; fi
-    }
-    mkdir -p "$(dirname "$2")"
-    printf "%s\n" "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1784381699557}" >"$2"
-    printf "%s\n" "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\",\"uuid\":\"tool_kimiopen\",\"turnId\":\"1\",\"step\":1,\"stepUuid\":\"step-uuid\",\"toolCallId\":\"tool_kimiopen\",\"name\":\"Agent\",\"args\":{\"description\":\"probe\",\"prompt\":\"probe\"}},\"time\":$(( fake_now - 2999 ))}" >>"$2"
-    kimi_hook_is_subagent_context "$3"
-  ' bash "$ROOT/hooks/lib/kimi-proof-state.sh" "$wire" "$input" \
-      >"$output" 2>"$output.err"; then
-    return 1
-  fi
+  freeze_time_ms "$(( $(date +%s%N) / 1000000 ))"
+  mkdir -p "$(dirname "$wire")" || { unfreeze_time; return 1; }
+  printf '%s\n' '{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}' >"$wire" || { unfreeze_time; return 1; }
+  printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$(( fake_now - 2999 ))" >>"$wire" || { unfreeze_time; return 1; }
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then unfreeze_time; return 1; fi
+  unfreeze_time
 
   write_kimi_main_wire "$wire" Agent no 3000 || return 1
   invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
@@ -1424,18 +1436,11 @@ test_stop_gate_kimi_own_marker_blocks_any_age() {
   is_stop_block "$out" &&
     json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active" || return 1
 
-  fake_now=$(( $(date +%s%N) / 1000000 ))
-  date() {
-    if [ "${1:-}" = "+%s%N" ]; then printf '%s\n' "$(( fake_now * 1000000 ))"
-    else command date "$@"; fi
-  }
-  export fake_now
-  export -f date
-  write_kimi_main_wire "$wire" Agent no 2500 || { unset -f date; return 1; }
+  freeze_time_ms "$(( $(date +%s%N) / 1000000 ))"
+  write_kimi_main_wire "$wire" Agent no 2500 || { unfreeze_time; return 1; }
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || { unset -f date; return 1; }
-  unset -f date
-  unset fake_now
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || { unfreeze_time; return 1; }
+  unfreeze_time
   json_field_equals "$out" '.continue // false' "true" || return 1
 
   write_kimi_main_wire "$wire" Agent no 3500 || return 1
@@ -1600,9 +1605,11 @@ test_stop_gate_kimi_open_call_age_bounds_stop() {
     "$FIXTURES/stop-basic.json" >"$input"
   out="$TMP_ROOT/stop-kimi-open-bounds.out"
 
-  write_kimi_main_wire "$wire" Agent no 500 || return 1
+  freeze_time_ms "$(( $(date +%s%N) / 1000000 ))"
+  write_kimi_main_wire "$wire" Agent no 500 || { unfreeze_time; return 1; }
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || { unfreeze_time; return 1; }
+  unfreeze_time
   json_field_equals "$out" '.continue // false' "true" || return 1
 
   write_kimi_main_wire "$wire" Agent no 25200000 || return 1

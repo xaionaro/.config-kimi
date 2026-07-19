@@ -781,6 +781,9 @@ CANDIDATE_VERIFIED_SOURCE_PATHS: Final = (
     *CANDIDATE_RUNTIME_SOURCE_PATHS,
     *CANDIDATE_HARNESS_SOURCE_PATHS,
 )
+# Positional contract: product_sources index 0 must be config.toml and
+# indices 1-3 the three wired hook entry points in config.toml order
+# (guarded by verify_manifest_closure and trace_configured_source).
 CONFIGURED_HOOK_PATHS: Final = CANDIDATE_RUNTIME_SOURCE_PATHS[1:4]
 
 

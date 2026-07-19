@@ -62,8 +62,8 @@ Status: FIXED.
   marker must use foreground agents. The Stop exemption covers them via
   `tasks/*.json`.
 - Legacy cwd-matched ECI markers are honored for backward compatibility
-  by `kimi_legacy_eci_markers_for_cwd`; none currently exist — only the
-  four live session-scoped markers.
+  by `kimi_legacy_eci_markers_for_cwd`; as of 2026-07 none currently
+  exist — only the four live session-scoped markers.
 - The pre-reviewer worker is inert on kimi: its admission gate
   (`kimi_hook_transcript_first_record_is_admissible`) always fails on
   kimi payloads, which carry no transcript_path. Enablement is deferred;

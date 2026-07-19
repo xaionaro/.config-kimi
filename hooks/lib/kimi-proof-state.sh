@@ -503,8 +503,8 @@ kimi_wire_security_warning() {
 }
 
 # Shared open-Agent/AgentSwarm-call scan: returns 0 when the wire holds an
-# open tool.call (no tool.result) whose record age is in [floor_ms,
-# KIMI_WIRE_OPEN_CALL_CEILING_MS]; anything unparseable yields no match.
+# open tool.call (no tool.result) whose record age is in
+# [floor_ms, ceiling_ms]; anything unparseable yields no match.
 kimi_wire_open_call_age() {
   local wire="$1" floor_ms="$2" ceiling_ms="$3" now_ms="$4"
   # floor/ceiling explicit at call sites: predicate [3000, 6h], active-work [0, 6h]
