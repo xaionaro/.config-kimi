@@ -22,7 +22,7 @@ scope="${2:-}"
 
 sid="${KIMI_SESSION_ID:-${KIMI_THREAD_ID:-}}"
 [ -n "$sid" ] || {
-  echo "ate-marker: no session id; export KIMI_SESSION_ID from the hook_result context line" >&2
+  echo "ate-marker: no session id; export KIMI_SESSION_ID from the hook_result context line, or discover it via ~/.kimi-code/bin/eci-active status bare (see the ATE Active Marker section of the agent-teams-execution skill)" >&2
   exit 1
 }
 kimi_valid_session_id "$sid" || { echo "Invalid session id: $sid" >&2; exit 1; }
@@ -49,7 +49,11 @@ else
   elif [ -f "$derived/ate_active" ]; then
     state_dir="$alt"
   else
-    echo "ate-marker: no session '$sid' (expected wire form $alt) and no existing marker; refusing to mint a new session marker" >&2
+    case "$sid" in
+      session_*) wire_form="$sid" ;;
+      *)         wire_form="session_$sid" ;;
+    esac
+    echo "ate-marker: no session '$sid' (expected wire form $wire_form) and no existing marker; refusing to mint a new session marker" >&2
     exit 1
   fi
 fi
@@ -66,6 +70,8 @@ write_marker() {
   } >"$target"
 }
 
+# Both forms exist: write both, never delete either; readers prefer the
+# exact form via kimi_existing_state_file's literal-first lookup.
 if [ "$state_dir" = both ]; then
   write_marker "$root/ate/sessions/$sid/ate_active"
   write_marker "$root/ate/sessions/$alt/ate_active"

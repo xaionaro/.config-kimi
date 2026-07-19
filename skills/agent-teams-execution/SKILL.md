@@ -50,6 +50,8 @@ If the main/orchestrator lacks standard agent tools too, hard-escalate. Never si
 
 ## ATE Active Marker
 
+Set `KIMI_SESSION_ID` to the `session_…` id from the hook_result context line. If no id is in context, run `~/.kimi-code/bin/eci-active status` bare: if a marker is active it prints the marker including its `session_id:` line — export that id; if it prints `ECI inactive (session: <id>)` — export that id; if it refuses, it lists candidate session paths (the last path component is the session id) — export the matching id and re-run `status` to confirm.
+
 Before the first teammate spawn, create the marker the stop gate reads:
 
 ```bash

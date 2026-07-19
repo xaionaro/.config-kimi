@@ -3,6 +3,11 @@
 
 set -euo pipefail
 
+# Freshness window for wire-activity binds. Plain assignment, deliberately
+# NOT env-overridable: a loosenable window weakens the ambiguity guard
+# (a stale wire means the candidate session is no longer live).
+KIMI_ECI_ACTIVE_FRESH_SECONDS=300
+
 base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$base_dir/hooks/lib/kimi-proof-state.sh"
 
@@ -17,8 +22,9 @@ Set KIMI_SESSION_ID, or KIMI_THREAD_ID when KIMI_SESSION_ID is
 unset, to target a session explicitly (unprefixed ids are normalized
 to the session_ wire form). Without either, the owning session is
 resolved from the kimi ancestor's cwd: sessions whose state.json
-workDir matches, freshest wire (<300s) wins; ties and misses refuse
-loudly. Cwd-scoped ECI state is never created.
+workDir matches; binds iff exactly one has any agents/*/wire.jsonl
+fresh (<300s); ties and misses refuse loudly. Cwd-scoped ECI state is
+never created.
 EOF
 }
 
@@ -50,8 +56,13 @@ resolve_session_dir() {
     case "$sid" in session_*) alt="${sid#session_}" ;; *) alt="session_$sid" ;; esac
     if kimi_session_dir_for_id "$sid" >/dev/null 2>&1; then printf '%s/%s\n' "$root" "$sid"; return 0; fi
     if [ -n "$alt" ] && kimi_session_dir_for_id "$alt" >/dev/null 2>&1; then printf '%s/%s\n' "$root" "$alt"; return 0; fi
-    if [ -d "$root/$sid" ]; then printf '%s/%s\n' "$root" "$sid"; return 0; fi
-    echo "eci-active: no session '$sid' under $sessions_root; known: $(ls "$sessions_root"/*/ -d 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')" >&2; exit 1
+    case "$sid" in session_*) wire="$sid" ;; *) wire="session_$sid" ;; esac
+    if kimi_reserved_proof_dir "$sid"; then
+      echo "eci-active: refusing to bind reserved proof dir '$sid'" >&2; exit 1
+    fi
+    if [ -d "$root/$wire" ]; then printf '%s/%s\n' "$root" "$wire"; return 0; fi
+    if [ "$wire" != "$sid" ] && [ -d "$root/$sid" ]; then printf '%s/%s\n' "$root" "$sid"; return 0; fi
+    echo "eci-active: no session '$sid' under $sessions_root; known: $(ls -d "$sessions_root"/*/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')" >&2; exit 1
   fi
 
   if [ -n "${KIMI_ECI_ACTIVE_TEST_KCWD:-}" ]; then
@@ -73,16 +84,19 @@ resolve_session_dir() {
     candidates+=("${sdir%/}")
   done
 
-  fresh=(); now="$(date +%s)"; FRESH=300
+  fresh=(); now="$(date +%s)"
   for c in ${candidates[@]+"${candidates[@]}"}; do
-    w="$c/agents/main/wire.jsonl"; [ -f "$w" ] || continue
-    m="$(stat -c '%Y' "$w" 2>/dev/null)" || continue
-    [ $(( now - m )) -lt "$FRESH" ] && fresh+=("$c")
+    for w in "$c"/agents/*/wire.jsonl; do
+      [ -f "$w" ] || continue
+      m="$(stat -c '%Y' "$w" 2>/dev/null)" || continue
+      if [ $(( now - m )) -lt "$KIMI_ECI_ACTIVE_FRESH_SECONDS" ]; then fresh+=("$c"); break; fi
+    done
   done
 
-  # freshness floor applies to every bind path
+  # freshness floor applies to the ancestry-resolved path only; explicit
+  # binds stay ungated so off/status can reach stale sessions
   if [ "${#fresh[@]}" -eq 1 ]; then printf '%s/%s\n' "$root" "${fresh[0]##*/}"; return 0; fi
-  echo "eci-active: could not determine owning session for cwd $kcwd (candidates: ${candidates[*]:-none}; fresh<300s: ${fresh[*]:-none}); re-run with KIMI_SESSION_ID=session_<uuid>" >&2; exit 1
+  echo "eci-active: could not determine owning session for cwd $kcwd (candidates: ${candidates[*]:-none}; fresh<${KIMI_ECI_ACTIVE_FRESH_SECONDS}s: ${fresh[*]:-none}); re-run with KIMI_SESSION_ID=session_<uuid>" >&2; exit 1
 }
 
 validate_disengage_report() {
@@ -200,7 +214,7 @@ case "$cmd" in
       [ -n "$legacy_marker" ] && [ -f "$legacy_marker" ]; then
       cat "$legacy_marker"
     else
-      echo "ECI inactive"
+      echo "ECI inactive (session: ${session_dir##*/})"
     fi
     ;;
   *)

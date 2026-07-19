@@ -17,7 +17,7 @@ kimi_valid_session_id() {
 # as session directories.
 kimi_reserved_proof_dir() {
   case "${1:-}" in
-    activity|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|kimi-wire-warnings-*|side-stop|skip-stop|skills)
+    activity|active-task|ate|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|kimi-wire-warnings-*|side-stop|skip-stop|skills|touched-repos)
       return 0
       ;;
     *)
@@ -200,7 +200,7 @@ kimi_existing_state_file() {
   if kimi_valid_session_id "$session_id"; then
     for sid in "$session_id" "$derived"; do
       [ -n "$sid" ] || continue
-      path="$(kimi_proof_root)/$session_id/$filename"
+      path="$(kimi_proof_root)/$sid/$filename"
       [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
     done
   fi

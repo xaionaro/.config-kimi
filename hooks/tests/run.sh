@@ -1684,8 +1684,8 @@ test_stop_gate_kimi_subagent_stop_never_exempted() {
 }
 
 write_resolver_session_fixture() {
-  local sessions_root="$1" sid="$2" workdir="$3" age_s="${4:-0}" bucketed="${5:-yes}"
-  local key dir
+  local sessions_root="$1" sid="$2" workdir="$3" age_s="${4:-0}" bucketed="${5:-yes}" agent_wires="${6:-}"
+  local key dir spec agent agent_age
   mkdir -p "$sessions_root" || return 1
   if [ "$bucketed" = yes ]; then
     key="$(printf '%s' "$workdir" | sha256sum | cut -c1-12)"
@@ -1699,6 +1699,15 @@ write_resolver_session_fixture() {
   if [ "$age_s" -gt 0 ]; then
     touch -d "$age_s seconds ago" "$dir/agents/main/wire.jsonl" || return 1
   fi
+  for spec in $agent_wires; do
+    agent="${spec%%:*}"
+    agent_age="${spec##*:}"
+    mkdir -p "$dir/agents/$agent" || return 1
+    printf '%s\n' '{"type":"metadata","protocol_version":"1.4","created_at":1784381699557}' >"$dir/agents/$agent/wire.jsonl" || return 1
+    if [ "$agent_age" -gt 0 ]; then
+      touch -d "$agent_age seconds ago" "$dir/agents/$agent/wire.jsonl" || return 1
+    fi
+  done
 }
 
 test_stop_gate_ate_cross_prefix_markers() {
@@ -1848,10 +1857,93 @@ test_eci_active_resolver_matrix() {
     return 1
   fi
   unset -f resolve_kimi_ancestor_cwd
-  grep -q "no kimi ancestor found" "$out.err"
+  grep -q "no kimi ancestor found" "$out.err" || return 1
+
+  # any-wire freshness: stale main + fresh agent wire binds
+  proof_root="$(fresh_proof_root eci-resolver-anywire)"
+  rm -rf "$sessions_root"
+  write_resolver_session_fixture "$sessions_root" session_bind-agent "$repo" 400 yes "agent-3:0" || return 1
+  env -u KIMI_ROLE -u KIMI_SESSION_ID -u KIMI_THREAD_ID \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_ECI_ACTIVE_TEST_KCWD="$repo" \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err" || return 1
+  [ -f "$proof_root/session_bind-agent/eci_active" ] || return 1
+
+  # any-wire freshness: main wire absent + fresh agent wire binds
+  rm -rf "$sessions_root"
+  write_resolver_session_fixture "$sessions_root" session_bind-agentless "$repo" 0 yes "agent-3:0" || return 1
+  rm -f "$sessions_root"/wd_*/session_bind-agentless/agents/main/wire.jsonl || return 1
+  env -u KIMI_ROLE -u KIMI_SESSION_ID -u KIMI_THREAD_ID \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_ECI_ACTIVE_TEST_KCWD="$repo" \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err" || return 1
+  [ -f "$proof_root/session_bind-agentless/eci_active" ] || return 1
+
+  # two candidates each any-wire-fresh refuse and mint nothing
+  proof_root="$(fresh_proof_root eci-resolver-anywire-tie)"
+  rm -rf "$sessions_root"
+  write_resolver_session_fixture "$sessions_root" session_bind-fresh "$repo" 400 yes "agent-1:0" || return 1
+  write_resolver_session_fixture "$sessions_root" session_bind-stale "$repo" 400 yes "agent-2:0" || return 1
+  if env -u KIMI_ROLE -u KIMI_SESSION_ID -u KIMI_THREAD_ID \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_ECI_ACTIVE_TEST_KCWD="$repo" \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err"; then return 1; fi
+  [ -z "$(find "$proof_root" -name eci_active -print -quit 2>/dev/null)" ] || return 1
+
+  # status names the resolved session even without a marker
+  proof_root="$(fresh_proof_root eci-resolver-status)"
+  rm -rf "$sessions_root"
+  write_resolver_session_fixture "$sessions_root" session_bind-status "$repo" 0 || return 1
+  env -u KIMI_ROLE -u KIMI_SESSION_ID -u KIMI_THREAD_ID \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_ECI_ACTIVE_TEST_KCWD="$repo" \
+    bash "$ROOT/bin/eci-active" status >"$out" 2>"$out.err" || return 1
+  [ "$(cat "$out")" = "ECI inactive (session: session_bind-status)" ] || return 1
+
+  # unknown-sid refusal lists session ids, not wd_ buckets
+  if env -u KIMI_ROLE -u KIMI_THREAD_ID -u KIMI_ECI_ACTIVE_TEST_KCWD \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_SESSION_ID=session_nope \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err"; then return 1; fi
+  grep -q "no session 'session_nope'" "$out.err" || return 1
+  grep -q "session_bind-status" "$out.err" || return 1
+  ! grep -q "wd_probe" "$out.err" || return 1
+
+  # wire-form-first: both proof-dir forms present, bare input binds prefixed
+  proof_root="$(fresh_proof_root eci-resolver-wireform)"
+  mkdir -p "$proof_root/testuuid" "$proof_root/session_testuuid"
+  env -u KIMI_ROLE -u KIMI_THREAD_ID -u KIMI_ECI_ACTIVE_TEST_KCWD \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_SESSION_ID=testuuid \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err" || return 1
+  [ -f "$proof_root/session_testuuid/eci_active" ] || return 1
+  [ ! -e "$proof_root/testuuid/eci_active" ] || return 1
+
+  # wire-form-first: both forms present, prefixed input binds prefixed
+  rm -f "$proof_root/session_testuuid/eci_active"
+  env -u KIMI_ROLE -u KIMI_THREAD_ID -u KIMI_ECI_ACTIVE_TEST_KCWD \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_SESSION_ID=session_testuuid \
+    bash "$ROOT/bin/eci-active" on "bind scope" >"$out" 2>"$out.err" || return 1
+  [ -f "$proof_root/session_testuuid/eci_active" ] || return 1
+  [ ! -e "$proof_root/testuuid/eci_active" ]
 }
 
-test_prompt_task_reminder_emits_session_id_hint() {
+test_kimi_existing_state_file_derived_prefix_at_proof_root() {
+  local proof_root bare output
+  proof_root="$(fresh_proof_root state-derived)"
+  bare="019df400-0000-7000-8000-0000000000aa"
+  mkdir -p "$proof_root/$bare" || return 1
+  printf 'phase: execution\n' >"$proof_root/$bare/ate_active"
+  output="$TMP_ROOT/state-derived.out"
+
+  env HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" bash -c \
+    '. "$1"; kimi_existing_state_file ate ate_active "$2" ""' \
+    bash "$ROOT/hooks/lib/kimi-proof-state.sh" "session_$bare" >"$output" || return 1
+  [ "$(cat "$output")" = "$proof_root/$bare/ate_active" ]
+}
+
+test_prompt_state_emits_session_id_hint_with_eci_marker() {
   local input out proof_root
   proof_root="$(fresh_proof_root reminder-id)"
   input="$TMP_ROOT/prompt-reminder-id.json"
@@ -7046,7 +7138,7 @@ test_eci_active_on_prefers_thread_id_without_session_id() {
     grep -q "ECI active: $proof_root/019df400-0000-7000-8000-000000000001/eci_active" "$out"
 }
 
-test_eci_active_on_never_binds_reserved_proof_dirs() {
+test_eci_active_on_binds_ate_proof_dir() {
   local proof_root repo sessions_root out
   proof_root="$(fresh_proof_root eci-on-ignore-reserved)"
   repo="$(make_git_repo eci-on-ignore-reserved)" || return 1
@@ -7062,7 +7154,17 @@ test_eci_active_on_never_binds_reserved_proof_dirs() {
 
   [ -e "$proof_root/session_019df400-0000-7000-8000-000000000001/eci_active" ] &&
     [ ! -e "$proof_root/ate/eci_active" ] &&
-    grep -q "ECI active: $proof_root/session_019df400-0000-7000-8000-000000000001/eci_active" "$out"
+    grep -q "ECI active: $proof_root/session_019df400-0000-7000-8000-000000000001/eci_active" "$out" || return 1
+
+  # explicit sid matching a reserved proof dir refuses and mints nothing
+  proof_root="$(fresh_proof_root eci-on-reserved-refuse)"
+  mkdir -p "$proof_root/ate"
+  if env -u KIMI_ROLE -u KIMI_THREAD_ID -u KIMI_ECI_ACTIVE_TEST_KCWD \
+    KIMI_CODE_HOME="$TMP_ROOT/codehome" KIMI_PROOF_ROOT="$proof_root" \
+    KIMI_SESSION_ID=ate \
+    bash "$ROOT/bin/eci-active" on "test scope" >"$out" 2>"$out.err"; then return 1; fi
+  grep -q "refusing to bind reserved proof dir 'ate'" "$out.err" || return 1
+  [ ! -e "$proof_root/ate/eci_active" ]
 }
 
 test_eci_active_off_binds_cwd_match_without_session_id() {
@@ -7581,8 +7683,10 @@ run_case "stop gate ATE cross-prefix markers" \
   test_stop_gate_ate_cross_prefix_markers
 run_case "eci-active resolver matrix" \
   test_eci_active_resolver_matrix
-run_case "prompt-task reminder emits session id hint" \
-  test_prompt_task_reminder_emits_session_id_hint
+run_case "existing state file derived prefix at proof root" \
+  test_kimi_existing_state_file_derived_prefix_at_proof_root
+run_case "prompt state emits session id hint with eci marker" \
+  test_prompt_state_emits_session_id_hint_with_eci_marker
 run_case "ate-marker writer matrix" \
   test_ate_marker_writer_matrix
 run_case "eci-active on binds and stop gate blocks" \
@@ -8099,8 +8203,8 @@ run_case "eci-active on binds freshest cwd match without KIMI_SESSION_ID" \
   test_eci_active_on_binds_freshest_cwd_match_without_session_id
 run_case "eci-active on prefers KIMI_THREAD_ID without KIMI_SESSION_ID" \
   test_eci_active_on_prefers_thread_id_without_session_id
-run_case "eci-active on never binds reserved proof dirs" \
-  test_eci_active_on_never_binds_reserved_proof_dirs
+run_case "eci-active on binds ate proof dir" \
+  test_eci_active_on_binds_ate_proof_dir
 run_case "eci-active off binds cwd match without KIMI_SESSION_ID" \
   test_eci_active_off_binds_cwd_match_without_session_id
 run_case "skip-stop uses cwd state without KIMI_SESSION_ID" \
