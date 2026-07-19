@@ -1,0 +1,43 @@
+{
+  "port": "kimi-code-hooks",
+  "status": "ported",
+  "naming": {
+    "library_prefix": "kimi_",
+    "acceptance_grep": "grep -rni 'codex' hooks/ bin/ proofs/ skills/agent-teams-execution/ --include='*.sh' --include='*.lean' --include='*.md' --include='*.py'",
+    "sanctioned_remnants": [
+      "CREATION-LOG historical attributions"
+    ]
+  },
+  "rows": [
+    {
+      "area": "hook-wiring",
+      "status": "ported",
+      "evidence": "config.toml [[hooks]]; legacy hooks.json removed"
+    },
+    {
+      "area": "subagent-hook-exemptions",
+      "status": "fixed",
+      "evidence": ["ed85f2f", "61bd4db", "ce75f27"]
+    },
+    {
+      "area": "turn-stop-enforcement",
+      "status": "fixed",
+      "evidence": ["18531f9"]
+    },
+    {
+      "area": "naming",
+      "status": "ported",
+      "evidence": ["36d56da"]
+    },
+    {
+      "area": "legacy-purge",
+      "status": "ported",
+      "evidence": ["7f9192c"]
+    },
+    {
+      "area": "known-limitations",
+      "status": "documented",
+      "evidence": "kimi-port/README.md#known-limitations"
+    }
+  ]
+}
