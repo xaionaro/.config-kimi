@@ -1,7 +1,7 @@
 import Proofs.Utf8Prefix
 import Std
 
-open CodexHooks
+open KimiHooks
 
 def main (args : List String) : IO UInt32 := do
   match args with

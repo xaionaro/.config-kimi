@@ -1,6 +1,6 @@
 import Proofs.PreReviewerController
 
-open CodexHooks
+open KimiHooks
 
 def parseStatus : String → Option ChildStatus
   | "success" => some .success

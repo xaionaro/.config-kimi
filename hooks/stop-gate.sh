@@ -4,10 +4,10 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
-codex_init_tmp || true
-codex_install_fail_open_trap stop-gate
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
+kimi_init_tmp || true
+kimi_install_fail_open_trap stop-gate
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -52,13 +52,13 @@ json_block() {
 active_eci_marker_for_stop() {
   local marker side_stop parent_session_id is_subagent_context=false
 
-  if codex_hook_is_subagent_context "$input"; then
+  if kimi_hook_is_subagent_context "$input"; then
     is_subagent_context=true
   fi
 
-  if codex_valid_session_id "$session_id"; then
+  if kimi_valid_session_id "$session_id"; then
     if [ "$is_subagent_context" = true ]; then
-      parent_session_id="$(codex_hook_parent_session_id "$input" 2>/dev/null || true)"
+      parent_session_id="$(kimi_hook_parent_session_id "$input" 2>/dev/null || true)"
       [ "$session_id" = "$parent_session_id" ] && return 1
     fi
 
@@ -67,9 +67,9 @@ active_eci_marker_for_stop() {
 
     [ "$is_subagent_context" = true ] && return 1
 
-    side_stop=$(codex_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
-    parent_session_id="$(codex_state_value "$side_stop" parent_session_id || true)"
-    if codex_valid_session_id "$parent_session_id"; then
+    side_stop=$(kimi_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
+    parent_session_id="$(kimi_state_value "$side_stop" parent_session_id || true)"
+    if kimi_valid_session_id "$parent_session_id"; then
       marker="$root/$parent_session_id/eci_active"
       [ -f "$marker" ] && { printf '%s\n' "$marker"; return 0; }
     fi
@@ -77,7 +77,7 @@ active_eci_marker_for_stop() {
 
   [ "$is_subagent_context" = true ] && return 1
 
-  codex_legacy_eci_markers_for_cwd "$cwd" 2>/dev/null | head -n1
+  kimi_legacy_eci_markers_for_cwd "$cwd" 2>/dev/null | head -n1
 }
 
 eci_blocker_report_allows_stop() {
@@ -88,8 +88,8 @@ eci_blocker_report_allows_stop() {
   report="${marker%/*}/eci-blocker-report.md"
   [ -f "$report" ] || return 1
   [ -n "$(find "$report" -mmin -1440 -print 2>/dev/null)" ] || return 1
-  codex_markdown_section_has_body "$report" "Blocker Requiring User Input" || return 1
-  codex_markdown_section_has_body "$report" "Why ECI Was Not Disengaged" || return 1
+  kimi_markdown_section_has_body "$report" "Blocker Requiring User Input" || return 1
+  kimi_markdown_section_has_body "$report" "Why ECI Was Not Disengaged" || return 1
 }
 
 block_if_eci_active_for_stop() {
@@ -97,19 +97,19 @@ block_if_eci_active_for_stop() {
 
   marker="$(active_eci_marker_for_stop || true)"
   [ -n "$marker" ] && [ -f "$marker" ] || return 1
-  codex_valid_session_id "$session_id" && codex_note_state_session_id "$marker" "$session_id" || true
+  kimi_valid_session_id "$session_id" && kimi_note_state_session_id "$marker" "$session_id" || true
   if eci_blocker_report_allows_stop "$marker"; then
     json_continue
     return 0
   fi
   local warn_note=""
-  if codex_valid_session_id "$session_id" &&
+  if kimi_valid_session_id "$session_id" &&
     [ -f "$root/kimi-wire-warnings-$session_id.jsonl" ]; then
     warn_note=" Recorded kimi-wire security warnings: $root/kimi-wire-warnings-$session_id.jsonl."
   fi
   local work_claim=""
-  if ! codex_hook_is_subagent_context "$input"; then
-    if codex_hook_kimi_session_has_active_work "$input"; then
+  if ! kimi_hook_is_subagent_context "$input"; then
+    if kimi_session_has_active_work "$input"; then
       json_continue
       return 0
     fi
@@ -127,7 +127,7 @@ if block_if_eci_active_for_stop; then
   exit 0
 fi
 
-# Kimi Stop payloads do not carry a codex-format transcript_path. When it is
+# Kimi Stop payloads do not carry a legacy transcript_path. When it is
 # absent the transcript-derived signals below simply degrade to their
 # fail-safe defaults (no transcript activity, no subagent exemption) and the
 # gate keeps enforcing from persisted state instead of skipping outright.
@@ -188,7 +188,7 @@ touched_repo_change_summary() {
   local marker="$1"
   local repo base_status_sha status status_sha repo_wide path path_status found=false
 
-  repo="$(codex_state_value "$marker" repo || true)"
+  repo="$(kimi_state_value "$marker" repo || true)"
   [ -n "$repo" ] || return 1
   git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
 
@@ -207,11 +207,11 @@ touched_repo_change_summary() {
   done < <(awk 'index($0, "path: ") == 1 { print substr($0, 7) }' "$marker" 2>/dev/null)
   [ "$found" = true ] && return 0
 
-  repo_wide="$(codex_state_value "$marker" repo_wide || true)"
+  repo_wide="$(kimi_state_value "$marker" repo_wide || true)"
   [ "$repo_wide" = true ] || return 1
 
-  base_status_sha="$(codex_state_value "$marker" status_sha || true)"
-  status_sha="$(codex_hash_string "$status")"
+  base_status_sha="$(kimi_state_value "$marker" status_sha || true)"
+  status_sha="$(kimi_hash_string "$status")"
 
   if [ -n "$status" ] && [ -n "$base_status_sha" ] && [ "$status_sha" != "$base_status_sha" ]; then
     printf '%s\n' "$repo"
@@ -226,7 +226,7 @@ touched_repos_change_summary() {
   local session_id="$1"
   local dir marker found=false summary
 
-  dir="$(codex_session_state_dir touched-repos "$session_id" 2>/dev/null || true)"
+  dir="$(kimi_session_state_dir touched-repos "$session_id" 2>/dev/null || true)"
   [ -n "$dir" ] && [ -d "$dir" ] || return 1
 
   for marker in "$dir"/*; do
@@ -409,7 +409,7 @@ repo_identity() {
     common="$(git_common_dir "$repo")"
     printf 'git:%s:%s\n' "$top" "$common"
   else
-    printf 'nogit:%s\n' "$(codex_canonical_cwd "$repo")"
+    printf 'nogit:%s\n' "$(kimi_canonical_cwd "$repo")"
   fi
 }
 
@@ -419,7 +419,7 @@ activity_marker_summary() {
   local marker name found=""
 
   for name in shell edit subagent; do
-    marker=$(codex_existing_state_file activity "$name" "$session_id" "$cwd" 2>/dev/null || true)
+    marker=$(kimi_existing_state_file activity "$name" "$session_id" "$cwd" 2>/dev/null || true)
     [ -n "$marker" ] && found="$found $name"
   done
 
@@ -477,7 +477,7 @@ transcript_has_activity_since_last_user() {
   ' "$transcript" >/dev/null 2>&1
 }
 
-if codex_hook_is_subagent_context "$input"; then
+if kimi_hook_is_subagent_context "$input"; then
   case "${KIMI_ROLE:-}" in
     lead|coordinator)
       json_continue
@@ -486,7 +486,7 @@ if codex_hook_is_subagent_context "$input"; then
   esac
 
   reminder="$proof_dir/subagent-commit-reminder.md"
-  skip=$(codex_existing_state_file skip-stop skip_stop "$session_id" "$cwd" 2>/dev/null || true)
+  skip=$(kimi_existing_state_file skip-stop skip_stop "$session_id" "$cwd" 2>/dev/null || true)
   if [ -n "$skip" ]; then
     rm -f "$reminder" 2>/dev/null || true
     json_continue
@@ -520,9 +520,9 @@ EOF
 fi
 
 repo="${cwd:-$PWD}"
-side_stop=$(codex_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
+side_stop=$(kimi_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
 
-if codex_side_stop_is_active_for_session "$side_stop" "$session_id"; then
+if kimi_side_stop_is_active_for_session "$side_stop" "$session_id"; then
   json_continue
   exit 0
 fi
@@ -530,11 +530,11 @@ fi
 proof="$proof_dir/proof.md"
 instructions="$proof_dir/instructions.md"
 baseline="$proof_dir/baseline_head"
-skip=$(codex_existing_state_file skip-stop skip_stop "$session_id" "$cwd" 2>/dev/null || true)
+skip=$(kimi_existing_state_file skip-stop skip_stop "$session_id" "$cwd" 2>/dev/null || true)
 eci_active="$root/$session_id/eci_active"
-legacy_eci_active="$(codex_legacy_eci_markers_for_cwd "$cwd" 2>/dev/null | head -n1 || true)"
-ate_active=$(codex_existing_state_file ate ate_active "$session_id" "$cwd" 2>/dev/null || true)
-task_active=$(codex_existing_state_file active-task task_active "$session_id" "$cwd" 2>/dev/null || true)
+legacy_eci_active="$(kimi_legacy_eci_markers_for_cwd "$cwd" 2>/dev/null | head -n1 || true)"
+ate_active=$(kimi_existing_state_file ate ate_active "$session_id" "$cwd" 2>/dev/null || true)
+task_active=$(kimi_existing_state_file active-task task_active "$session_id" "$cwd" 2>/dev/null || true)
 activity_summary="$(activity_marker_summary "$session_id" "$cwd")"
 change_summary="$(git_change_summary "$repo" "$baseline" || true)"
 changed=false
@@ -561,7 +561,7 @@ block_proof_validation() {
 }
 
 if [ -n "$eci_active" ] && [ -f "$eci_active" ]; then
-  codex_note_state_session_id "$eci_active" "$session_id" || true
+  kimi_note_state_session_id "$eci_active" "$session_id" || true
   if eci_blocker_report_allows_stop "$eci_active"; then
     json_continue
     exit 0
@@ -581,12 +581,12 @@ if [ -n "$skip" ] && [ -f "$skip" ] && [ -n "$(find "$skip" -mmin -60 -print 2>/
 fi
 
 if [ -n "$ate_active" ] && [ -f "$ate_active" ]; then
-  ate_phase=$(codex_state_value "$ate_active" phase || true)
+  ate_phase=$(kimi_state_value "$ate_active" phase || true)
   case "$ate_phase" in
     awaiting_user|closed) ;;
     *)
-      codex_note_state_session_id "$ate_active" "$session_id" || true
-      if codex_hook_kimi_session_has_active_work "$input"; then
+      kimi_note_state_session_id "$ate_active" "$session_id" || true
+      if kimi_session_has_active_work "$input"; then
         json_continue
         exit 0
       fi
@@ -618,12 +618,12 @@ if reviewer_out=$(printf '%s' "$input" | "$HOOK_DIR/system-prompt-reviewer.sh");
 fi
 
 if [ -f "$proof" ]; then
-  if codex_markdown_section_has_body "$proof" "ECI completion certificate"; then
-    if ! codex_markdown_section_has_body "$proof" "Stop checklist walkthrough" || ! codex_markdown_section_has_body "$proof" "Incomplete compliance"; then
+  if kimi_markdown_section_has_body "$proof" "ECI completion certificate"; then
+    if ! kimi_markdown_section_has_body "$proof" "Stop checklist walkthrough" || ! kimi_markdown_section_has_body "$proof" "Incomplete compliance"; then
       block_proof_validation "ECI completion proof must include non-empty Stop checklist walkthrough and Incomplete compliance sections."
     fi
 
-    marker_error="$(codex_eci_terminal_verdict_error "ECI completion proof" "$proof")"
+    marker_error="$(kimi_eci_terminal_verdict_error "ECI completion proof" "$proof")"
     if [ -n "$marker_error" ]; then
       block_proof_validation "$marker_error"
     fi
@@ -654,12 +654,12 @@ if [ -f "$proof" ]; then
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
         return s
       }
-      function check_sources(raw, label,   body, n, i, item, nonempty, has_codex) {
+      function check_sources(raw, label,   body, n, i, item, nonempty, has_agents_md) {
         body = raw
         sub(/^[^:]*:[[:space:]]*/, "", body)
         n = split(body, parts, ",")
         nonempty = 0
-        has_codex = 0
+        has_agents_md = 0
         for (i = 1; i <= n; i++) {
           item = trim(parts[i])
           if (item == "") {
@@ -667,10 +667,10 @@ if [ -f "$proof" ]; then
           } else {
             nonempty++
           }
-          if (item ~ /AGENTS\.md/) has_codex = 1
+          if (item ~ /AGENTS\.md/) has_agents_md = 1
         }
         if (nonempty < 3) print label ": need at least three non-empty sources"
-        if (!has_codex) print label ": must include AGENTS.md among the sources"
+        if (!has_agents_md) print label ": must include AGENTS.md among the sources"
       }
       function finish_violation() {
         if (violation_count == 0) return
@@ -773,7 +773,7 @@ if [ -f "$proof" ]; then
     fi
 
     history_identity="$(repo_identity "$repo")"
-    history_key="$(codex_hash_string "$history_identity")"
+    history_key="$(kimi_hash_string "$history_identity")"
     history_dir="$root/history/$history_key"
     history_file="$history_dir/$session_id.log"
     mkdir -p "$history_dir"
@@ -803,15 +803,15 @@ if [ -f "$proof" ]; then
             sub(/^[^:]*:[[:space:]]*/, "", body)
             n = split(body, parts, ",")
             nonempty = 0
-            has_codex = 0
+            has_agents_md = 0
             empty = 0
             for (i = 1; i <= n; i++) {
               item = trim(parts[i])
               if (item == "") empty = 1
               else nonempty++
-              if (item ~ /AGENTS\.md/) has_codex = 1
+              if (item ~ /AGENTS\.md/) has_agents_md = 1
             }
-            if (nonempty >= 3 && has_codex && !empty) ok = 1
+            if (nonempty >= 3 && has_agents_md && !empty) ok = 1
           }
           END { print ok ? 1 : 0 }
         ')
@@ -842,8 +842,8 @@ if [ -f "$proof" ]; then
     rm -f "$audit_hashes"
   fi
 
-  activity_dir=$(codex_session_state_dir activity "$session_id" 2>/dev/null || true)
-  task_dir=$(codex_session_state_dir active-task "$session_id" 2>/dev/null || true)
+  activity_dir=$(kimi_session_state_dir activity "$session_id" 2>/dev/null || true)
+  task_dir=$(kimi_session_state_dir active-task "$session_id" 2>/dev/null || true)
   [ -n "$activity_dir" ] && rm -rf "$activity_dir"
   [ -n "$task_dir" ] && rm -f "$task_dir/task_active"
   rm -f "$proof" "$instructions" "$baseline"
@@ -859,8 +859,8 @@ if [ -f "$proof" ]; then
 fi
 
 if [ "$stop_active" = "true" ]; then
-  activity_dir=$(codex_session_state_dir activity "$session_id" 2>/dev/null || true)
-  task_dir=$(codex_session_state_dir active-task "$session_id" 2>/dev/null || true)
+  activity_dir=$(kimi_session_state_dir activity "$session_id" 2>/dev/null || true)
+  task_dir=$(kimi_session_state_dir active-task "$session_id" 2>/dev/null || true)
   [ -n "$activity_dir" ] && rm -rf "$activity_dir"
   [ -n "$task_dir" ] && rm -f "$task_dir/task_active"
   rm -f "$instructions" "$baseline"

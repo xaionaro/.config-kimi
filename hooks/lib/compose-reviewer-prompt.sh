@@ -32,7 +32,7 @@ compose_reviewer_prompt() {
 
   if [ -f "$import_summary" ]; then
     printf '\n============================================================\n'
-    printf '# imported migration summary (Codex migration notes)\n'
+    printf '# imported migration summary (Kimi migration notes)\n'
     printf '============================================================\n\n'
     cat "$import_summary"
     printf '\n'

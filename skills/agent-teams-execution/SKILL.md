@@ -18,7 +18,6 @@ Phased agent team with adversarial review loops and tiered information trust.
 - Every subagent prompt must include: "Follow any Stop-hook prompt in that session, including required proof/checklist files. Fix blockers within assigned scope. Report to the orchestrator only when resolution needs out-of-scope changes, unrelated user work, credentials, or approval."
 - If the main/orchestrator lacks standard agent tools, do not run this pipeline; hard-escalate instead of launching shell-based Kimi sessions.
 - If a teammate role lacks standard agent tools required by ATE but the main/orchestrator has them, use the Lead-Mediated Nested Delegation Adapter.
-- `CODEX_ROLE` is the pre-port name of the role variable; the ported gates read `KIMI_ROLE`. Do not use it to launch teammates.
 
 **Core principle:** Explorers gather hard facts, designer architects from facts, executors aggregate implementation until root-task E2E passes, reviewers tear apart the integrated diff, QA validates the whole. Coordinator manages logistics, lead audits rule compliance. Neither implements.
 
@@ -54,20 +53,20 @@ If the main/orchestrator lacks standard agent tools too, hard-escalate. Never si
 Before the first teammate spawn, create the marker the stop gate reads:
 
 ```bash
-. "${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/lib/codex-proof-state.sh"
+. "${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/lib/kimi-proof-state.sh"
 
 update_ate_marker() {
   phase="$1"
   scope="$2"
   session_id="${KIMI_SESSION_ID:-${KIMI_THREAD_ID:-}}"
   if [ -n "$session_id" ]; then
-    codex_valid_session_id "$session_id" || {
+    kimi_valid_session_id "$session_id" || {
       echo "Invalid ATE session id: $session_id" >&2
       exit 1
     }
-    marker="$(codex_session_state_dir ate "$session_id")/ate_active"
+    marker="$(kimi_session_state_dir ate "$session_id")/ate_active"
   else
-    marker="$(codex_cli_state_file ate ate_active true)"
+    marker="$(kimi_cli_state_file ate ate_active true)"
   fi
 
   mkdir -p "$(dirname "$marker")"

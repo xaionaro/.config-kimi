@@ -4,22 +4,22 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
 . "$HOOK_DIR/lib/reviewer-backend.sh"
 . "$HOOK_DIR/lib/compose-reviewer-prompt.sh"
 . "$HOOK_DIR/lib/reviewer-filter.sh"
 . "$HOOK_DIR/lib/reviewer-call.sh"
 . "$HOOK_DIR/lib/reviewer-redact.sh"
-codex_init_tmp || true
+kimi_init_tmp || true
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 [ -z "$cwd" ] && cwd="$PWD"
 
-codex_valid_session_id "$session_id" || exit 0
-if codex_hook_is_subagent_context "$input"; then
+kimi_valid_session_id "$session_id" || exit 0
+if kimi_hook_is_subagent_context "$input"; then
   exit 0
 fi
 
@@ -28,7 +28,7 @@ if ! parse_reviewer_env KIMI_STOP_REVIEWER; then
 fi
 [ -n "$REVIEWER_BACKEND" ] || exit 0
 
-root="$(codex_proof_root)"
+root="$(kimi_proof_root)"
 state_dir="$root/reviewer/$session_id"
 mkdir -p "$state_dir" 2>/dev/null || exit 0
 [ -f "$state_dir/bypass" ] && exit 0

@@ -1,7 +1,7 @@
 import Proofs.PruneTurnState
 import Std
 
-open CodexHooks
+open KimiHooks
 
 def parseBit : String → Option Bool
   | "0" => some false

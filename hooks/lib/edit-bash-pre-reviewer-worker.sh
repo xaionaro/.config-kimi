@@ -4,19 +4,19 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
 . "$HOOK_DIR/lib/pre-reviewer-turn-state.sh"
 . "$HOOK_DIR/lib/reviewer-backend.sh"
 . "$HOOK_DIR/lib/reviewer-call.sh"
 . "$HOOK_DIR/lib/reviewer-redact.sh"
-codex_init_tmp || true
+kimi_init_tmp || true
 
 input="$(python3 "$HOOK_DIR/lib/bounded_hook_input.py" stdin)" || exit 0
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
 tool_name=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)
-turn_id_json="$(codex_hook_turn_id_json "$input")"
-codex_valid_session_id "$session_id" || exit 0
+turn_id_json="$(kimi_hook_turn_id_json "$input")"
+kimi_valid_session_id "$session_id" || exit 0
 
 case "$tool_name" in
   Bash|Edit|Write) ;;
@@ -24,16 +24,16 @@ case "$tool_name" in
 esac
 
 [ -n "$turn_id_json" ] || exit 0
-codex_hook_transcript_first_record_is_admissible "$input" || exit 0
+kimi_hook_transcript_first_record_is_admissible "$input" || exit 0
 
-if codex_hook_is_subagent_context "$input"; then
+if kimi_hook_is_subagent_context "$input"; then
   exit 0
 fi
 
-root="$(codex_proof_root)"
+root="$(kimi_proof_root)"
 state_dir="$root/pre-reviewer/$session_id"
 stop_state_dir="$root/reviewer/$session_id"
-codex_ensure_private_pre_reviewer_state_dir "$state_dir" || exit 0
+kimi_ensure_private_pre_reviewer_state_dir "$state_dir" || exit 0
 
 is_touch_bypass_command() {
   local command_text="$1"
@@ -75,19 +75,19 @@ if ! parse_reviewer_env "$reviewer_env_name"; then
 fi
 [ -n "$REVIEWER_BACKEND" ] || exit 0
 
-claim_key="$(codex_turn_state_key "$turn_id_json" 2>/dev/null || true)"
+claim_key="$(kimi_turn_state_key "$turn_id_json" 2>/dev/null || true)"
 [ -n "$claim_key" ] || exit 0
-capture="$(codex_turn_capture_path "$state_dir" "$claim_key")"
-claim="$(codex_turn_claim_path "$state_dir" "$claim_key")"
+capture="$(kimi_turn_capture_path "$state_dir" "$claim_key")"
+claim="$(kimi_turn_claim_path "$state_dir" "$claim_key")"
 consumed_capture_tmp=""
 validated_prompt_tmp=""
 cleanup_present_turn() {
-  codex_unlock_pre_reviewer_turn
+  kimi_unlock_pre_reviewer_turn
   rm -f "${consumed_capture_tmp:-}" "${validated_prompt_tmp:-}" 2>/dev/null || true
 }
 trap cleanup_present_turn EXIT
 trap 'cleanup_present_turn; exit 0' HUP INT TERM
-codex_lock_pre_reviewer_turn "$state_dir" || exit 0
+kimi_lock_pre_reviewer_turn "$state_dir" || exit 0
 if [ -e "$claim" ] || [ -L "$claim" ]; then
   exit 0
 fi
@@ -98,7 +98,7 @@ umask 077
 consumed_capture_tmp="$(mktemp "$state_dir/.capture-turn-$claim_key.consumed.XXXXXX")" || exit 0
 chmod 0600 "$consumed_capture_tmp" || exit 0
 mv -f -- "$capture" "$consumed_capture_tmp" || exit 0
-codex_private_regular_file "$consumed_capture_tmp" || exit 0
+kimi_private_regular_file "$consumed_capture_tmp" || exit 0
 validated_prompt_tmp="$(mktemp "$state_dir/.capture-turn-$claim_key.prompt.XXXXXX")" || exit 0
 if ! python3 "$HOOK_DIR/lib/turn_capture_validator.py" "$turn_id_json" \
     {KIMI_TURN_LOCK_FD}>&- \
@@ -113,7 +113,7 @@ if ! ( umask 077; set -C; : >"$claim" ) 2>/dev/null; then
   fi
   exit 0
 fi
-codex_unlock_pre_reviewer_turn
+kimi_unlock_pre_reviewer_turn
 rm -f -- "$consumed_capture_tmp" "$validated_prompt_tmp" 2>/dev/null || true
 consumed_capture_tmp=""
 validated_prompt_tmp=""

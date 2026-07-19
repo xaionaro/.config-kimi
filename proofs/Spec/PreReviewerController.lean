@@ -1,4 +1,4 @@
-namespace CodexHooks
+namespace KimiHooks
 
 inductive ChildStatus where
   | success
@@ -237,4 +237,4 @@ def profileEvidenceAccepted (evidence : ProfileEvidence) : Bool :=
     evidence.freshControllerCompilation &&
     !evidence.reuseControllerCompilation
 
-end CodexHooks
+end KimiHooks

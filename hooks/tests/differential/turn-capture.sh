@@ -103,7 +103,7 @@ mapfile -t shell_outputs < <(
       turn-mixed-4096) printf -v turn_id '%*s' 4090 ''; turn_id=${turn_id// /x}; turn_id+="é😀" ;;
     esac
     input=$(jq -cn --arg turn_id "$turn_id" '{turn_id:$turn_id}')
-    extracted=$(bash -c '. "$1"; codex_hook_turn_id_json "$2"' \
+    extracted=$(bash -c '. "$1"; kimi_hook_turn_id_json "$2"' \
       bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$input")
     canonical=$(jq -cn --arg turn_id "$turn_id" '$turn_id')
     if [ -n "$extracted" ] && [ "$extracted" = "$canonical" ]; then

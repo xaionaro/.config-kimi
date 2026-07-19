@@ -104,12 +104,12 @@ if [ "$#" -ne 0 ]; then
 fi
 
 status=0
-formal_tmp_root="$(codex_select_formal_tmpfs_scratch)" || {
+formal_tmp_root="$(kimi_select_formal_tmpfs_scratch)" || {
   printf '%s\n' 'private writable tmpfs is required for profiling' >&2
   exit 1
 }
 wrapper_owns_formal=true
-output_root="$(codex_select_formal_persistent_storage)" || {
+output_root="$(kimi_select_formal_persistent_storage)" || {
   printf '%s\n' 'private persistent evidence storage is required for profiling' >&2
   exit 1
 }

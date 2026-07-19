@@ -1,4 +1,4 @@
-namespace CodexHooks
+namespace KimiHooks
 
 def isAsciiAlphaNum (char : Char) : Bool :=
   ('a' ≤ char && char ≤ 'z') ||
@@ -66,4 +66,4 @@ def deleteAfterRevalidation
     (lockAcquired _observedSelected currentSelected : Bool) : Bool :=
   lockAcquired && currentSelected
 
-end CodexHooks
+end KimiHooks

@@ -1,4 +1,4 @@
-namespace CodexHooks
+namespace KimiHooks
 
 structure TurnCapture where
   turnId : String
@@ -25,4 +25,4 @@ def validateTurnCapture (expectedTurnId : String) (capture : TurnCapture) : Opti
   else
     none
 
-end CodexHooks
+end KimiHooks

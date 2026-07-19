@@ -13,7 +13,7 @@ if ! command -v strace >/dev/null 2>&1; then
 fi
 
 # The formal Lean A/B harness is bound to a git checkout that carries the
-# pinned profile revisions and the proofs/ Lean project (the codex repo
+# pinned profile revisions and the proofs/ Lean project (the kimi repo
 # layout). A plain hooks+port tree without that checkout runs the rest of
 # the suite and reports the formal cases as SKIP.
 FORMAL_AVAILABLE=0
@@ -36,7 +36,7 @@ if [ "$FORMAL_AVAILABLE" = 1 ]; then
     printf '%s\n' "FAIL setup complete Lean/Lake object closure is required"
     exit 1
   fi
-  if ! FORMAL_TMP_ROOT="$(codex_select_formal_tmpfs_scratch)"; then
+  if ! FORMAL_TMP_ROOT="$(kimi_select_formal_tmpfs_scratch)"; then
     printf '%s\n' "FAIL setup private writable tmpfs is required for formal lifecycle checks"
     exit 1
   fi
@@ -49,7 +49,7 @@ if ! TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kimi-hooks-tests.XXXXXX")"; then
 fi
 
 if [ "$FORMAL_AVAILABLE" = 1 ]; then
-  if ! FORMAL_PERSISTENT_ROOT="$(codex_select_formal_persistent_storage)"; then
+  if ! FORMAL_PERSISTENT_ROOT="$(kimi_select_formal_persistent_storage)"; then
     rm -rf -- "$TMP_ROOT" "$FORMAL_TMP_ROOT"
     printf '%s\n' "FAIL setup private persistent formal evidence storage is required"
     exit 1
@@ -139,7 +139,7 @@ PY
   prune_verifier="$ROOT/hooks/tests/differential/prune-turn-state.sh"
   prune_publish="$FORMAL_PERSISTENT_ROOT/artifacts/prune"
   mkdir -p "$prune_publish"
-  if ! codex_build_formal_artifact \
+  if ! kimi_build_formal_artifact \
       "$FORMAL_TMP_ROOT" "$FORMAL_PERSISTENT_ROOT" "$ROOT" \
       "$ROOT/hooks/tests/process-watchdog.py" prune-build.log \
       "$prune_verifier" --build-artifact "$prune_publish"; then
@@ -475,8 +475,8 @@ test_prompt_state_keeps_nontrivial_governance_task_silent() {
     "Update AGENTS.md and hooks/prompt-task-reminder.sh to enforce governance routing."
 }
 
-test_prompt_state_keeps_codex_typo_silent() {
-  prompt_state_prompt_stays_silent "prompt-codex-typo-silent" \
+test_prompt_state_keeps_kimi_typo_silent() {
+  prompt_state_prompt_stays_silent "prompt-kimi-typo-silent" \
     "Fix a typo in AGENTS.md"
 }
 
@@ -564,8 +564,8 @@ test_prompt_state_keeps_stop_hook_prompt_task_silent() {
     "Tighten the Stop-hook prompt."
 }
 
-test_prompt_state_keeps_codex_review_task_silent() {
-  prompt_state_prompt_stays_silent "prompt-codex-review-silent" \
+test_prompt_state_keeps_kimi_review_task_silent() {
+  prompt_state_prompt_stays_silent "prompt-kimi-review-silent" \
     "Review AGENTS.md."
 }
 
@@ -649,8 +649,8 @@ test_prompt_state_keeps_stop_checklist_task_silent() {
     "Update stop checklist."
 }
 
-test_prompt_state_keeps_codex_config_task_silent() {
-  prompt_state_prompt_stays_silent "prompt-codex-config-silent" \
+test_prompt_state_keeps_kimi_config_task_silent() {
+  prompt_state_prompt_stays_silent "prompt-kimi-config-silent" \
     "Update Kimi config.toml."
 }
 
@@ -748,7 +748,7 @@ test_runtime_hook_probe_historical_evidence_is_sanitized() {
     all(keys_unsorted | all(IN("hook_event_name", "session_id", "cwd", "tool_name", "tool_input_keys", "observed"))) and
     any(
       .hook_event_name == "UserPromptSubmit" and
-      .cwd == "<codex-home>" and
+      .cwd == "<kimi-home>" and
       (.session_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
     ) and
     any(
@@ -793,7 +793,7 @@ test_session_snapshot_saves_baseline_and_clears_legacy_skip() {
 }
 
 test_session_snapshot_runs_for_transcriptless_threads() {
-  # Kimi SessionStart payloads carry no codex transcript_path marking ephemeral
+  # Kimi SessionStart payloads carry no legacy transcript_path marking ephemeral
   # side threads, so transcriptless starts are ordinary sessions: the snapshot
   # records state and emits the startup context.
   local proof_root out
@@ -944,7 +944,7 @@ test_eci_gate_message_mentions_clean_pass_user_closed() {
 test_eci_gate_ignores_code_file_edit_from_cwd_state() {
   local proof_root input out cwd_dir
   proof_root="$(fresh_proof_root eci-code-cwd)"
-  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/codex-proof-state.sh"; codex_ensure_cwd_state_dir eci "$1"' "$ROOT" "$ROOT")" || return 1
+  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/kimi-proof-state.sh"; kimi_ensure_cwd_state_dir eci "$1"' "$ROOT" "$ROOT")" || return 1
   printf 'scope: stale cwd state\n' >"$cwd_dir/eci_active"
 
   input="$TMP_ROOT/eci-code-cwd.json"
@@ -1024,7 +1024,7 @@ trace_first_record_helper() {
 
   strace -f -qq -s 8192 -e trace=read -P "$transcript" -o "$trace" \
     env HOME="$TMP_ROOT/home" bash -c '. "$1"; "$2" "$3"' \
-    bash "$ROOT/hooks/lib/codex-proof-state.sh" "$helper" \
+    bash "$ROOT/hooks/lib/kimi-proof-state.sh" "$helper" \
     "$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')" \
     >"$output" 2>"$output.err"
 }
@@ -1055,7 +1055,7 @@ invoke_state_helper() {
   local output="$3"
 
   env HOME="$TMP_ROOT/home" bash -c '. "$1"; "$2" "$3"' \
-    bash "$ROOT/hooks/lib/codex-proof-state.sh" "$helper" "$input" \
+    bash "$ROOT/hooks/lib/kimi-proof-state.sh" "$helper" "$input" \
     >"$output" 2>"$output.err"
 }
 
@@ -1072,12 +1072,12 @@ test_subagent_helper_rejects_oversize_first_record() {
     trace="$TMP_ROOT/first-record-subagent-$label.strace"
     write_first_record_scoped_subagent_transcript "$transcript" "$record_bytes" || return 1
     if [ "$label" = large ]; then
-      if trace_first_record_helper codex_hook_is_subagent_context \
+      if trace_first_record_helper kimi_hook_is_subagent_context \
           "$transcript" "$output" "$trace"; then
         return 1
       fi
     else
-      trace_first_record_helper codex_hook_is_subagent_context \
+      trace_first_record_helper kimi_hook_is_subagent_context \
         "$transcript" "$output" "$trace" || return 1
     fi
     [ ! -s "$output" ] && trace_is_first_record_scoped "$trace" "$transcript" || return 1
@@ -1091,7 +1091,7 @@ test_parent_helper_rejects_oversize_first_record() {
   trace="$TMP_ROOT/first-record-parent-large.strace"
   write_first_record_scoped_subagent_transcript "$transcript" 1048576 || return 1
 
-  if trace_first_record_helper codex_hook_parent_session_id \
+  if trace_first_record_helper kimi_hook_parent_session_id \
       "$transcript" "$output" "$trace"; then
     return 1
   fi
@@ -1105,10 +1105,10 @@ test_first_record_helpers_reject_oversize_without_final_newline() {
   write_first_record_scoped_subagent_transcript "$transcript" 1048576 no no || return 1
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
 
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then
     return 1
   fi
-  if invoke_state_helper codex_hook_parent_session_id "$input" "$output"; then
+  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then
     return 1
   fi
   [ ! -s "$output" ]
@@ -1124,55 +1124,55 @@ test_first_record_helpers_preserve_boundary_behavior() {
   input="$(jq -cn --arg transcript "$transcript" --arg sid child-session \
     '{transcript_path: $transcript, session_id: $sid}')"
   output="$TMP_ROOT/boundary-subagent.out"
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
-  invoke_state_helper codex_hook_parent_session_id "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || return 1
   [ "$(cat "$output")" = parent-session ] || return 1
 
   transcript="$dir/boundary-no-final-newline.jsonl"
   printf '%s' "$(cat "$dir/boundary-subagent.jsonl")" >"$transcript"
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
-  invoke_state_helper codex_hook_parent_session_id "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || return 1
   [ "$(cat "$output")" = parent-session ] || return 1
 
   transcript="$dir/boundary-empty.jsonl"
   : >"$transcript"
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper codex_hook_parent_session_id "$input" "$output" || true
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
   [ ! -s "$output" ] || return 1
 
   transcript="$dir/boundary-malformed.jsonl"
   printf '%s\n' '{malformed' >"$transcript"
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper codex_hook_parent_session_id "$input" "$output" || true
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
   [ ! -s "$output" ] || return 1
 
   transcript="$dir/boundary-missing.jsonl"
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  if invoke_state_helper codex_hook_parent_session_id "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then return 1; fi
 
   transcript="$dir/boundary-main.jsonl"
   write_main_transcript "$transcript" || return 1
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper codex_hook_parent_session_id "$input" "$output" || true
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
   [ ! -s "$output" ] || return 1
 
   transcript="$dir/boundary-invalid-parent.jsonl"
   printf '%s\n' '{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"../bad"}}}}}' >"$transcript"
   input="$(jq -cn --arg transcript "$transcript" --arg sid child-session \
     '{transcript_path: $transcript, session_id: $sid}')"
-  invoke_state_helper codex_hook_allowed_session_ids "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_allowed_session_ids "$input" "$output" || return 1
   [ "$(cat "$output")" = child-session ] || return 1
 
   transcript="$TMP_ROOT/outside-restricted-session-path.jsonl"
   write_subagent_transcript "$transcript" || return 1
   input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  if invoke_state_helper codex_hook_parent_session_id "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then return 1; fi
   [ ! -s "$output" ]
 }
 
@@ -1203,17 +1203,17 @@ test_subagent_helper_kimi_open_agent_call() {
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   write_kimi_main_wire "$wire" Agent no 5000 || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 
   write_kimi_main_wire "$wire" AgentSwarm no 5000 || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 
   write_kimi_main_wire "$wire" Agent yes 5000 || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   write_kimi_main_wire "$wire" Agent no 5000 || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_other","toolCallId":"tool_other","result":{"output":"x"}}}' >>"$wire" || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 }
 
 test_subagent_helper_kimi_main_context_variants() {
@@ -1224,34 +1224,34 @@ test_subagent_helper_kimi_main_context_variants() {
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   write_kimi_main_wire "$wire" Agent yes || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   cat >"$wire" <<'JSON' || return 1
 {"type":"metadata","protocol_version":"1.4","created_at":1784381699557}
 {"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_plain","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_plain","name":"Write","args":{"path":"/x"}}}
 JSON
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   printf '%s\n' 'not json at all' >"$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   printf '%s' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_trunc","toolCa' >"$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   rm -f "$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   input="$(jq -cn '{session_id: "session_missing"}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
-  if invoke_state_helper codex_hook_is_subagent_context '{}' "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context '{}' "$output"; then return 1; fi
 
   input="$(jq -cn '{session_id: "../session_kimi-probe"}')"
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
   write_kimi_main_wire "$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 }
 
 test_subagent_helper_kimi_fresh_open_call_is_main() {
@@ -1262,7 +1262,7 @@ test_subagent_helper_kimi_fresh_open_call_is_main() {
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   write_kimi_main_wire "$wire" Agent no 500 || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 }
 
 test_subagent_helper_kimi_stale_open_call_is_main() {
@@ -1273,7 +1273,7 @@ test_subagent_helper_kimi_stale_open_call_is_main() {
   input="$(jq -cn --arg sid session_kimi-probe '{session_id: $sid}')"
 
   write_kimi_main_wire "$wire" Agent no 25200000 || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 }
 
 test_subagent_helper_kimi_batched_sibling_unresolved_still_subagent() {
@@ -1285,7 +1285,7 @@ test_subagent_helper_kimi_batched_sibling_unresolved_still_subagent() {
 
   write_kimi_main_wire "$wire" Agent no 5000 || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_sibling","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_sibling","name":"Write","args":{"path":"/x"}}}' >>"$wire" || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 }
 
 test_subagent_helper_kimi_background_spawn_result() {
@@ -1297,7 +1297,7 @@ test_subagent_helper_kimi_background_spawn_result() {
 
   write_kimi_main_wire "$wire" Agent no 5000 || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_kimiopen","toolCallId":"tool_kimiopen","result":{"output":"task_id: agent-x0bg\nstatus: running\nagent_id: agent-0"}}}' >>"$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
 }
 
 test_subagent_helper_kimi_protocol_mismatch_warns() {
@@ -1313,12 +1313,12 @@ test_subagent_helper_kimi_protocol_mismatch_warns() {
 {"type":"metadata","protocol_version":"9.9","created_at":1784381699557}
 {"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":1}
 JSON
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
   [ -f "$warn" ] || return 1
   [ "$(wc -l <"$warn")" -eq 1 ] || return 1
   grep -qF '"kind":"wire-protocol-mismatch"' "$warn" || return 1
 
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
   [ "$(wc -l <"$warn")" -eq 1 ]
 }
 
@@ -1352,7 +1352,7 @@ test_subagent_helper_kimi_large_wire_all_closed() {
   write_kimi_main_wire_large "$wire" || return 1
   i=0
   while [ "$i" -lt 20 ]; do
-    if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+    if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
     i=$((i + 1))
   done
 }
@@ -1369,7 +1369,7 @@ test_subagent_helper_kimi_large_wire_one_open() {
   printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_closed","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_closed","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$now_ms" >>"$wire" || return 1
   printf '%s\n' '{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"tool_tail_closed","toolCallId":"tool_tail_closed","result":{"output":"done"}}}' >>"$wire" || return 1
   printf '{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_tail_open","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_tail_open","name":"AgentSwarm","args":{"description":"probe","prompt":"probe"}},"time":%s}\n' "$(( now_ms - 5000 ))" >>"$wire" || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 }
 
 test_eci_active_gate_kimi_subagent_context_allows() {
@@ -1439,8 +1439,8 @@ test_subagent_helper_kimi_protocol_warning_channel_isolation() {
 {"type":"metadata","protocol_version":"9.9","created_at":1784381699557}
 {"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"tool_kimiopen","turnId":"1","step":1,"stepUuid":"step-uuid","toolCallId":"tool_kimiopen","name":"Agent","args":{"description":"probe","prompt":"probe"}},"time":1}
 JSON
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
   [ -f "$warn_new" ] || return 1
   [ "$(wc -l <"$warn_new")" -eq 1 ] || return 1
   grep -qF '"kind":"wire-protocol-mismatch"' "$warn_new" || return 1
@@ -1458,17 +1458,17 @@ test_subagent_helper_kimi_protocol_warning_mkdir() {
   mkdir -p "$(dirname "$wire")" || return 1
   rm -rf "$TMP_ROOT/home/.cache/kimi-proof" || return 1
   printf '%s\n' '{"type":"metadata","protocol_version":"9.9","created_at":1784381699557}' >"$wire" || return 1
-  if invoke_state_helper codex_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
   [ -f "$warn" ] || return 1
   grep -qF '"kind":"wire-protocol-mismatch"' "$warn"
 }
 
 test_subagent_helper_kimi_wire_warnings_reserved_glob() {
   local output="$TMP_ROOT/kimi-wire-reserved.out"
-  invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warnings-abc' "$output" || return 1
-  invoke_state_helper codex_reserved_proof_dir 'security-warnings-abc' "$output" || return 1
-  if invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warningsx' "$output"; then return 1; fi
-  if invoke_state_helper codex_reserved_proof_dir 'kimi-wire-warnings' "$output"; then return 1; fi
+  invoke_state_helper kimi_reserved_proof_dir 'kimi-wire-warnings-abc' "$output" || return 1
+  invoke_state_helper kimi_reserved_proof_dir 'security-warnings-abc' "$output" || return 1
+  if invoke_state_helper kimi_reserved_proof_dir 'kimi-wire-warningsx' "$output"; then return 1; fi
+  if invoke_state_helper kimi_reserved_proof_dir 'kimi-wire-warnings' "$output"; then return 1; fi
 }
 
 test_subagent_helper_kimi_floor_boundary() {
@@ -1490,14 +1490,14 @@ test_subagent_helper_kimi_floor_boundary() {
     mkdir -p "$(dirname "$2")"
     printf "%s\n" "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1784381699557}" >"$2"
     printf "%s\n" "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\",\"uuid\":\"tool_kimiopen\",\"turnId\":\"1\",\"step\":1,\"stepUuid\":\"step-uuid\",\"toolCallId\":\"tool_kimiopen\",\"name\":\"Agent\",\"args\":{\"description\":\"probe\",\"prompt\":\"probe\"}},\"time\":$(( fake_now - 2999 ))}" >>"$2"
-    codex_hook_is_subagent_context "$3"
-  ' bash "$ROOT/hooks/lib/codex-proof-state.sh" "$wire" "$input" \
+    kimi_hook_is_subagent_context "$3"
+  ' bash "$ROOT/hooks/lib/kimi-proof-state.sh" "$wire" "$input" \
       >"$output" 2>"$output.err"; then
     return 1
   fi
 
   write_kimi_main_wire "$wire" Agent no 3000 || return 1
-  invoke_state_helper codex_hook_is_subagent_context "$input" "$output" || return 1
+  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
 }
 
 test_stop_gate_kimi_floor_legacy_marker() {
@@ -1878,8 +1878,8 @@ test_reviewer_backend_parser_rejects_credential_backends() {
     . "$ROOT/hooks/lib/reviewer-backend.sh"
     ! KIMI_STOP_REVIEWER="claude" parse_reviewer_env KIMI_STOP_REVIEWER &&
       ! KIMI_STOP_REVIEWER="github-copilot:gpt-4.1" parse_reviewer_env KIMI_STOP_REVIEWER &&
-      ! KIMI_STOP_REVIEWER="codex-as-role:reviewer" parse_reviewer_env KIMI_STOP_REVIEWER &&
-      ! KIMI_STOP_REVIEWER="codex:codex" parse_reviewer_env KIMI_STOP_REVIEWER &&
+      ! KIMI_STOP_REVIEWER="agent-as-role:reviewer" parse_reviewer_env KIMI_STOP_REVIEWER &&
+      ! KIMI_STOP_REVIEWER="agent:agent" parse_reviewer_env KIMI_STOP_REVIEWER &&
       ! KIMI_STOP_REVIEWER="shell:agent" parse_reviewer_env KIMI_STOP_REVIEWER
   )
 }
@@ -1960,7 +1960,7 @@ EOF
   )
 }
 
-test_system_reviewer_slices_sanitized_codex_transcript() {
+test_system_reviewer_slices_sanitized_kimi_transcript() {
   local proof_root input out transcript body
   proof_root="$(fresh_proof_root reviewer-slice)"
   transcript="$(main_reviewer_transcript_path)"
@@ -1981,7 +1981,7 @@ test_system_reviewer_slices_sanitized_codex_transcript() {
     grep -q '## USER_HISTORY' "$body" &&
     grep -q 'Earlier request: inspect the hook config.' "$body" &&
     grep -q '## CURRENT_TURN' "$body" &&
-    grep -q 'Current request: implement the Codex reviewer hook.' "$body" &&
+    grep -q 'Current request: implement the Kimi reviewer hook.' "$body" &&
     grep -q 'TOOL_RESULT:' "$body" &&
     ! grep -q 'Earlier response should not appear in USER_HISTORY.' "$body"
 }
@@ -2475,8 +2475,8 @@ submit_current_turn() {
 turn_state_key() {
   local turn_id="$1"
 
-  env HOME="$TMP_ROOT/home" bash -c '. "$1"; codex_hash_string "$2"' \
-    bash "$ROOT/hooks/lib/codex-proof-state.sh" \
+  env HOME="$TMP_ROOT/home" bash -c '. "$1"; kimi_hash_string "$2"' \
+    bash "$ROOT/hooks/lib/kimi-proof-state.sh" \
     "$(jq -cn --arg turn_id "$turn_id" '$turn_id')"
 }
 
@@ -2506,7 +2506,7 @@ test_pre_reviewer_lock_is_bounded_and_fileless() {
   status=0
   env KIMI_PRE_REVIEWER_LOCK_TIMEOUT=2 bash -c '
     . "$1"
-    codex_lock_pre_reviewer_turn "$2"
+    kimi_lock_pre_reviewer_turn "$2"
   ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" || status=$?
   ended_ns="$(date +%s%N)" || return 1
   flock -u "$holder_fd" || return 1
@@ -2559,8 +2559,8 @@ test_pre_reviewer_lock_timeout_accepts_only_zero_through_one() {
       KIMI_TEST_FLOCK_TIMEOUT_ARG="$TMP_ROOT/flock-timeout-arg" \
       KIMI_PRE_REVIEWER_LOCK_TIMEOUT="$value" bash -c '
         . "$1"
-        codex_lock_pre_reviewer_turn "$2" || exit 1
-        codex_unlock_pre_reviewer_turn
+        kimi_lock_pre_reviewer_turn "$2" || exit 1
+        kimi_unlock_pre_reviewer_turn
       ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" || return 1
     IFS= read -r observed <"$TMP_ROOT/flock-timeout-arg" || return 1
     [ "$observed" = "$value" ] || return 1
@@ -2572,8 +2572,8 @@ test_pre_reviewer_lock_timeout_accepts_only_zero_through_one() {
       KIMI_TEST_FLOCK_TIMEOUT_ARG="$TMP_ROOT/flock-timeout-arg" \
       KIMI_PRE_REVIEWER_LOCK_TIMEOUT="$value" bash -c '
         . "$1"
-        codex_lock_pre_reviewer_turn "$2" || exit 1
-        codex_unlock_pre_reviewer_turn
+        kimi_lock_pre_reviewer_turn "$2" || exit 1
+        kimi_unlock_pre_reviewer_turn
       ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" || return 1
     IFS= read -r observed <"$TMP_ROOT/flock-timeout-arg" || return 1
     [ "$observed" = 1 ] || return 1
@@ -2599,8 +2599,8 @@ test_pre_reviewer_lock_revalidates_after_waiting_path_swap() {
   env PATH="$bin_dir:$PATH" KIMI_TEST_LOCK_READY="$ready" \
     KIMI_PRE_REVIEWER_LOCK_TIMEOUT=1 bash -c '
       . "$1"
-      if codex_lock_pre_reviewer_turn "$2"; then
-        codex_unlock_pre_reviewer_turn
+      if kimi_lock_pre_reviewer_turn "$2"; then
+        kimi_unlock_pre_reviewer_turn
         exit 0
       fi
       exit 1
@@ -2626,8 +2626,8 @@ test_pre_reviewer_lock_revalidates_after_waiting_path_swap() {
   [ "$status" -ne 0 ] &&
     env bash -c '
       . "$1"
-      codex_lock_pre_reviewer_turn "$2" || exit 1
-      codex_unlock_pre_reviewer_turn
+      kimi_lock_pre_reviewer_turn "$2" || exit 1
+      kimi_unlock_pre_reviewer_turn
     ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir"
 }
 
@@ -2646,8 +2646,8 @@ test_pre_reviewer_lock_revalidates_private_mode_after_waiting() {
   env PATH="$bin_dir:$PATH" KIMI_TEST_LOCK_READY="$ready" \
     KIMI_PRE_REVIEWER_LOCK_TIMEOUT=1 bash -c '
       . "$1"
-      if codex_lock_pre_reviewer_turn "$2"; then
-        codex_unlock_pre_reviewer_turn
+      if kimi_lock_pre_reviewer_turn "$2"; then
+        kimi_unlock_pre_reviewer_turn
         exit 0
       fi
       exit 1
@@ -2903,7 +2903,7 @@ test_turn_state_pruning_is_old_regular_file_and_namespace_scoped() {
     "$state_dir/capture-turn-old-directory.json" || return 1
 
   env HOME="$TMP_ROOT/home" bash -c \
-    '. "$1"; codex_prune_pre_reviewer_turn_state "$2"' \
+    '. "$1"; kimi_prune_pre_reviewer_turn_state "$2"' \
     bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" || return 1
 
   [ ! -e "$old_capture" ] && [ ! -e "$old_temp" ] && [ ! -e "$old_claim" ] &&
@@ -2921,10 +2921,10 @@ test_turn_state_pruning_rejects_shared_lock_and_runs_after_release() {
 
   env HOME="$TMP_ROOT/home" bash -c \
     '. "$1"
-      codex_lock_pre_reviewer_turn "$2" || exit 1
-      if codex_prune_pre_reviewer_turn_state "$2"; then exit 1; fi
-      codex_unlock_pre_reviewer_turn
-      codex_prune_pre_reviewer_turn_state "$2"' \
+      kimi_lock_pre_reviewer_turn "$2" || exit 1
+      if kimi_prune_pre_reviewer_turn_state "$2"; then exit 1; fi
+      kimi_unlock_pre_reviewer_turn
+      kimi_prune_pre_reviewer_turn_state "$2"' \
     bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" || return 1
   [ ! -e "$old_claim" ]
 }
@@ -3036,7 +3036,7 @@ test_present_turn_with_retained_state_skips_pruner() {
     [ "$(find "$state_dir" -maxdepth 1 -type f -name 'claim-turn-retained-old-*' | wc -l)" -eq 500 ] &&
     [ "$(find "$state_dir" -maxdepth 1 -type f -name 'capture-turn-retained-old-*.json' | wc -l)" -eq 500 ] &&
     [ "$(find "$state_dir" -maxdepth 1 -type f -name '.capture-turn-retained-old-*' | wc -l)" -eq 1000 ] &&
-    ! grep -q 'codex_prune_pre_reviewer_turn_state' "$ROOT/hooks/edit-bash-pre-reviewer.sh"
+    ! grep -q 'kimi_prune_pre_reviewer_turn_state' "$ROOT/hooks/edit-bash-pre-reviewer.sh"
 }
 
 test_prompt_retained_state_prunes_once_without_per_file_subprocesses() {
@@ -3337,8 +3337,8 @@ test_hash_fails_open_without_sha256_or_python() {
   out="$TMP_ROOT/hash-no-sha-no-python.out"
   mkdir -p "$bin_dir" || return 1
 
-  if PATH="$bin_dir" /bin/bash -c '. "$1"; codex_hash_string value' \
-      bash "$ROOT/hooks/lib/codex-proof-state.sh" >"$out" 2>/dev/null; then
+  if PATH="$bin_dir" /bin/bash -c '. "$1"; kimi_hash_string value' \
+      bash "$ROOT/hooks/lib/kimi-proof-state.sh" >"$out" 2>/dev/null; then
     return 1
   fi
   [ ! -s "$out" ]
@@ -3897,7 +3897,7 @@ SH
   status=0
   env PATH="$bin_dir:$PATH" KIMI_TEST_PYTHON_MARKER="$marker" bash -c '
     . "$1"
-    codex_ensure_private_pre_reviewer_state_dir "$2"
+    kimi_ensure_private_pre_reviewer_state_dir "$2"
   ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" \
     >"$out" 2>"$out.err" || status=$?
 
@@ -3924,7 +3924,7 @@ SH
   status=0
   env PATH="$bin_dir:$PATH" KIMI_TEST_PYTHON_MARKER="$marker" bash -c '
     . "$1"
-    codex_ensure_private_pre_reviewer_state_dir "$2"
+    kimi_ensure_private_pre_reviewer_state_dir "$2"
   ' bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$state_dir" \
     >"$out" 2>"$out.err" || status=$?
 
@@ -4287,7 +4287,7 @@ test_turn_id_extractor_enforces_utf8_byte_bound_and_canonical_json() {
       mixed-4096) printf -v turn_id '%*s' 4090 ''; turn_id=${turn_id// /x}; turn_id+="é😀"; expected=1 ;;
     esac
     input=$(jq -cn --arg turn_id "$turn_id" '{turn_id:$turn_id}') || return 1
-    extracted=$(bash -c '. "$1"; codex_hook_turn_id_json "$2"' \
+    extracted=$(bash -c '. "$1"; kimi_hook_turn_id_json "$2"' \
       bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$input") || return 1
     canonical=$(jq -cn --arg turn_id "$turn_id" '$turn_id') || return 1
     if [ "$expected" -eq 1 ]; then
@@ -4301,7 +4301,7 @@ test_turn_id_extractor_enforces_utf8_byte_bound_and_canonical_json() {
   printf '{"turn_id":"\377"}' >"$input"
   # jq normalizes a raw invalid byte to U+FFFD; strict rejection remains in the
   # Python capture validator, whose parser receives bytes rather than shell text.
-  [ "$(bash -c '. "$1"; codex_hook_turn_id_json "$(cat "$2")"' \
+  [ "$(bash -c '. "$1"; kimi_hook_turn_id_json "$(cat "$2")"' \
     bash "$ROOT/hooks/lib/pre-reviewer-turn-state.sh" "$input")" = '"�"' ]
 }
 
@@ -4558,7 +4558,7 @@ test_pre_reviewer_claude_alias_enables_fake_deny() {
 }
 
 test_pre_reviewer_kimi_alias_precedence_ignores_malformed_lower_aliases() {
-  run_pre_reviewer_fake_deny "pre-reviewer-codex-precedence" \
+  run_pre_reviewer_fake_deny "pre-reviewer-kimi-precedence" \
     KIMI_EDIT_PRE_REVIEWER="ollama:http://127.0.0.1:11434:qwen3:4b" \
     LLM_EDIT_PRE_REVIEWER="malformed" \
     CLAUDE_EDIT_PRE_REVIEWER="also-malformed"
@@ -4572,7 +4572,7 @@ test_pre_reviewer_llm_alias_precedence_ignores_malformed_claude() {
 }
 
 test_pre_reviewer_malformed_kimi_does_not_fallback_to_llm() {
-  run_pre_reviewer_expect_no_output "pre-reviewer-malformed-codex-no-llm-fallback" \
+  run_pre_reviewer_expect_no_output "pre-reviewer-malformed-kimi-no-llm-fallback" \
     KIMI_EDIT_PRE_REVIEWER="malformed" \
     LLM_EDIT_PRE_REVIEWER="ollama:http://127.0.0.1:11434:qwen3:4b" \
     CLAUDE_EDIT_PRE_REVIEWER=
@@ -4951,9 +4951,9 @@ test_validate_edit_write_blocks_submodule_edit() {
   mkdir -p "$repo/.git" "$sub"
   printf 'gitdir: %s/modules/sub\n' "$repo/.git" >"$sub/.git"
   echo "package x" >"$sub/file.go"
-  input="$TMP_ROOT/edit-submod-codex.json"
+  input="$TMP_ROOT/edit-submod-kimi.json"
   jq -n --arg fp "$sub/file.go" '{tool_name:"Edit",tool_input:{file_path:$fp,old_string:"x",new_string:"y"}}' >"$input"
-  out="$TMP_ROOT/edit-submod-codex.out"
+  out="$TMP_ROOT/edit-submod-kimi.out"
   run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$input" || return 1
   is_pretool_deny "$out" &&
     json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason // empty' "git submodule"
@@ -4964,9 +4964,9 @@ test_validate_edit_write_allows_regular_repo_edit() {
   repo="$TMP_ROOT/regular-repo-$$"
   mkdir -p "$repo/.git"
   echo "package x" >"$repo/file.go"
-  input="$TMP_ROOT/edit-regular-codex.json"
+  input="$TMP_ROOT/edit-regular-kimi.json"
   jq -n --arg fp "$repo/file.go" '{tool_name:"Edit",tool_input:{file_path:$fp,old_string:"x",new_string:"y"}}' >"$input"
-  out="$TMP_ROOT/edit-regular-codex.out"
+  out="$TMP_ROOT/edit-regular-kimi.out"
   run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$input" || return 1
   expect_no_output "$out"
 }
@@ -5260,9 +5260,9 @@ test_validate_bash_allows_write_into_submodule() {
   sub="$repo/sub"
   mkdir -p "$repo/.git" "$sub"
   printf 'gitdir: %s/modules/sub\n' "$repo/.git" >"$sub/.git"
-  input="$TMP_ROOT/bash-submod-codex.json"
+  input="$TMP_ROOT/bash-submod-kimi.json"
   jq -n --arg cmd "echo y > $sub/file.go" '{tool_name:"Bash",tool_input:{command:$cmd}}' >"$input"
-  out="$TMP_ROOT/bash-submod-codex.out"
+  out="$TMP_ROOT/bash-submod-kimi.out"
   run_hook "$out" "$ROOT/hooks/validate-bash.sh" "$input" || return 1
   local decision
   decision=$(jq -r '.hookSpecificOutput.permissionDecision // "no-decision"' <"$out" 2>/dev/null)
@@ -6403,7 +6403,7 @@ test_stop_gate_ignores_cwd_eci_state() {
   local proof_root input out cwd_dir repo
   proof_root="$(fresh_proof_root stop-cwd-eci)"
   repo="$(make_git_repo stop-cwd-eci)" || return 1
-  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/codex-proof-state.sh"; codex_ensure_cwd_state_dir eci "$1"' "$ROOT" "$repo")" || return 1
+  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/kimi-proof-state.sh"; kimi_ensure_cwd_state_dir eci "$1"' "$ROOT" "$repo")" || return 1
   printf 'scope: stale cwd state\n' >"$cwd_dir/eci_active"
 
   input="$TMP_ROOT/stop-cwd-eci.json"
@@ -6418,7 +6418,7 @@ test_stop_gate_ignores_cwd_eci_state_without_cwd_field() {
   local proof_root input out cwd_dir repo
   proof_root="$(fresh_proof_root stop-cwd-eci-no-cwd)"
   repo="$(make_git_repo stop-cwd-eci-no-cwd)" || return 1
-  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/codex-proof-state.sh"; codex_ensure_cwd_state_dir eci "$1"' "$ROOT" "$repo")" || return 1
+  cwd_dir="$(KIMI_PROOF_ROOT="$proof_root" bash -c '. "$0/hooks/lib/kimi-proof-state.sh"; kimi_ensure_cwd_state_dir eci "$1"' "$ROOT" "$repo")" || return 1
   printf 'scope: stale cwd state\n' >"$cwd_dir/eci_active"
 
   input="$TMP_ROOT/stop-cwd-eci-no-cwd.json"
@@ -7531,7 +7531,7 @@ run_case "prompt state config is wired without temporary probe" \
 run_case "prompt state keeps nontrivial governance task silent" \
   test_prompt_state_keeps_nontrivial_governance_task_silent
 run_case "prompt state keeps AGENTS.md typo silent" \
-  test_prompt_state_keeps_codex_typo_silent
+  test_prompt_state_keeps_kimi_typo_silent
 run_case "prompt state keeps hooks path governance task silent" \
   test_prompt_state_keeps_hooks_path_governance_task_silent
 run_case "prompt state leaves React hook prompt silent" \
@@ -7551,7 +7551,7 @@ run_case "prompt state keeps subagent Stop-hook prompt task silent" \
 run_case "prompt state keeps Stop-hook prompt task silent" \
   test_prompt_state_keeps_stop_hook_prompt_task_silent
 run_case "prompt state keeps AGENTS.md review task silent" \
-  test_prompt_state_keeps_codex_review_task_silent
+  test_prompt_state_keeps_kimi_review_task_silent
 run_case "prompt state keeps hook behavior audit task silent" \
   test_prompt_state_keeps_hook_behavior_audit_task_silent
 run_case "prompt state keeps hook tests task silent" \
@@ -7585,7 +7585,7 @@ run_case "prompt state keeps stop checklist path task silent" \
 run_case "prompt state keeps stop checklist task silent" \
   test_prompt_state_keeps_stop_checklist_task_silent
 run_case "prompt state keeps Kimi config task silent" \
-  test_prompt_state_keeps_codex_config_task_silent
+  test_prompt_state_keeps_kimi_config_task_silent
 run_case "prompt state leaves CLI installation instructions silent" \
   test_prompt_state_leaves_cli_installation_instructions_silent
 run_case "prompt state leaves onboarding email instructions silent" \
@@ -7702,8 +7702,8 @@ run_case "reviewer filter keeps real rules and drops fabricated rules" \
   test_reviewer_filter_keeps_real_rules_and_drops_fabricated_rules
 run_case "reviewer filter keeps user-history agreement rules" \
   test_reviewer_filter_keeps_user_history_agreement_rules
-run_case "system reviewer slices sanitized Codex transcript" \
-  test_system_reviewer_slices_sanitized_codex_transcript
+run_case "system reviewer slices sanitized Kimi transcript" \
+  test_system_reviewer_slices_sanitized_kimi_transcript
 run_case "system reviewer skips VCS context when ECI active" \
   test_system_reviewer_skips_vcs_when_eci_active
 run_case "system reviewer redacts background process secrets" \

@@ -1,6 +1,6 @@
 import Spec.OwnedProcessGroup
 
-open CodexHooks
+open KimiHooks
 
 def bit (value : Bool) : String := if value then "1" else "0"
 

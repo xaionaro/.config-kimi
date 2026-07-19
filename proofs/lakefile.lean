@@ -1,11 +1,11 @@
 import Lake
 open Lake DSL
 
-package «codex-stop-proofs» where
+package «kimi-stop-proofs» where
 
 lean_lib StopEci where
 
-lean_lib CodexHooksProofs where
+lean_lib KimiHooksProofs where
   roots := #[`Spec.OwnedProcessGroup, `Proofs.OwnedProcessGroup,
     `Spec.PruneTurnState, `Spec.TurnCapture, `Spec.Utf8Prefix,
     `Spec.PreReviewerController, `Proofs.PruneTurnState, `Proofs.TurnCapture,

@@ -1,4 +1,4 @@
-namespace CodexHooks
+namespace KimiHooks
 
 inductive OwnedGroupEvent where
   | registerIdentity
@@ -138,4 +138,4 @@ def linuxContainmentAdmissionAccepted
   linux && parentMatched && parentDeathVerified && subreaperVerified &&
     pidfdVerified && controlCloseOnExec
 
-end CodexHooks
+end KimiHooks

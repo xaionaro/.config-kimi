@@ -1,6 +1,6 @@
 import Spec.TurnCapture
 
-namespace CodexHooks
+namespace KimiHooks
 
 theorem validateTurnCapture_sound (expectedTurnId : String) (capture : TurnCapture)
     (prompt : String) (validated : validateTurnCapture expectedTurnId capture = some prompt) :
@@ -21,4 +21,4 @@ theorem validateTurnCapture_complete (expectedTurnId : String) (capture : TurnCa
   subst expectedTurnId
   simp [validateTurnCapture, turnIdUsable, promptBounded, promptHasNoNul]
 
-end CodexHooks
+end KimiHooks

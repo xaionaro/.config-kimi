@@ -5,7 +5,7 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
 . "$HOOK_DIR/lib/pre-reviewer-turn-state.sh"
 . "$HOOK_DIR/lib/reviewer-redact.sh"
 
@@ -14,8 +14,8 @@ session_id=$(printf '%s' "$input" | jq -r 'if (.session_id? | type) == "string" 
 cwd=$(printf '%s' "$input" | jq -r 'if (.cwd? | type) == "string" then .cwd else "" end' 2>/dev/null || true)
 prompt=$(printf '%s' "$input" | jq -r 'if (.prompt? | type) == "string" then .prompt else "" end' 2>/dev/null || true)
 prompt_type=$(printf '%s' "$input" | jq -r '.prompt? | type' 2>/dev/null || true)
-turn_id_json="$(codex_hook_turn_id_json "$input")"
-root="$(codex_proof_root)"
+turn_id_json="$(kimi_hook_turn_id_json "$input")"
+root="$(kimi_proof_root)"
 
 capture_redacted_tmp=""
 capture_capped_tmp=""
@@ -26,7 +26,7 @@ cleanup_capture_temps() {
 }
 
 cleanup_prompt_turn() {
-  codex_unlock_pre_reviewer_turn
+  kimi_unlock_pre_reviewer_turn
   cleanup_capture_temps
 }
 
@@ -82,13 +82,13 @@ write_side_stop_marker() {
   } >"$dir/side_stop"
 }
 
-if codex_valid_session_id "$session_id"; then
+if kimi_valid_session_id "$session_id"; then
   if [ -n "$turn_id_json" ]; then
     reviewer_dir="$root/reviewer/$session_id"
     pre_reviewer_dir="$root/pre-reviewer/$session_id"
     mkdir -p "$reviewer_dir"
     pre_reviewer_ready=false
-    if codex_ensure_private_pre_reviewer_state_dir "$pre_reviewer_dir"; then
+    if kimi_ensure_private_pre_reviewer_state_dir "$pre_reviewer_dir"; then
       pre_reviewer_ready=true
     fi
     head=$(git -C "$HOME/.kimi-code" rev-parse HEAD 2>/dev/null || true)
@@ -101,15 +101,15 @@ if codex_valid_session_id "$session_id"; then
     fi
 
     if [ "$pre_reviewer_ready" = true ]; then
-      turn_key="$(codex_turn_state_key "$turn_id_json" 2>/dev/null || true)"
+      turn_key="$(kimi_turn_state_key "$turn_id_json" 2>/dev/null || true)"
       capture_prepared=false
       if [ -n "$turn_key" ] && [ "$prompt_type" = "string" ] &&
           prepare_current_turn_capture "$pre_reviewer_dir" "$turn_key"; then
         capture_prepared=true
       fi
-      if [ -n "$turn_key" ] && codex_lock_pre_reviewer_turn "$pre_reviewer_dir"; then
-        turn_capture="$(codex_turn_capture_path "$pre_reviewer_dir" "$turn_key")"
-        turn_claim="$(codex_turn_claim_path "$pre_reviewer_dir" "$turn_key")"
+      if [ -n "$turn_key" ] && kimi_lock_pre_reviewer_turn "$pre_reviewer_dir"; then
+        turn_capture="$(kimi_turn_capture_path "$pre_reviewer_dir" "$turn_key")"
+        turn_claim="$(kimi_turn_claim_path "$pre_reviewer_dir" "$turn_key")"
         if [ ! -e "$turn_claim" ] && [ ! -L "$turn_claim" ]; then
           if rm -f -- "$turn_capture"; then
             if [ "$capture_prepared" = true ]; then
@@ -119,8 +119,8 @@ if codex_valid_session_id "$session_id"; then
             fi
           fi
         fi
-        codex_unlock_pre_reviewer_turn
-        codex_prune_pre_reviewer_turn_state "$pre_reviewer_dir" || true
+        kimi_unlock_pre_reviewer_turn
+        kimi_prune_pre_reviewer_turn_state "$pre_reviewer_dir" || true
       fi
       cleanup_capture_temps
       trap - EXIT HUP INT TERM
@@ -130,7 +130,7 @@ if codex_valid_session_id "$session_id"; then
   if printf '%s\n' "$prompt" | grep -Eq '^[[:space:]]*/side([[:space:]]|$)'; then
     write_side_stop_marker "$root/side-stop/sessions/$session_id"
     if [ -n "$cwd" ]; then
-      side_dir="$(codex_ensure_cwd_state_dir side-stop "$cwd" 2>/dev/null || true)"
+      side_dir="$(kimi_ensure_cwd_state_dir side-stop "$cwd" 2>/dev/null || true)"
       [ -n "$side_dir" ] && write_side_stop_marker "$side_dir"
     fi
   fi

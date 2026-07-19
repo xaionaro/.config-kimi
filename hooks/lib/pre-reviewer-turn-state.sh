@@ -1,7 +1,7 @@
 # Shared per-turn state primitives for UserPromptSubmit and PreToolUse hooks.
 # shellcheck shell=bash
 
-codex_hook_turn_id_json() {
+kimi_hook_turn_id_json() {
   local input="${1:-}"
 
   # Input is a valid UTF-8 JSON object. A malformed raw-byte alias is outside
@@ -17,26 +17,26 @@ codex_hook_turn_id_json() {
     2>/dev/null || true
 }
 
-codex_turn_state_key() {
+kimi_turn_state_key() {
   local turn_id_json="$1"
   local key
 
-  key="$(codex_hash_string "$turn_id_json" 2>/dev/null || true)"
+  key="$(kimi_hash_string "$turn_id_json" 2>/dev/null || true)"
   case "$key" in
     ""|*[!A-Za-z0-9_-]*) return 1 ;;
   esac
   printf '%s\n' "$key"
 }
 
-codex_turn_capture_path() {
+kimi_turn_capture_path() {
   printf '%s/capture-turn-%s.json\n' "$1" "$2"
 }
 
-codex_turn_claim_path() {
+kimi_turn_claim_path() {
   printf '%s/claim-turn-%s\n' "$1" "$2"
 }
 
-codex_ensure_private_pre_reviewer_state_dir() {
+kimi_ensure_private_pre_reviewer_state_dir() {
   local state_dir="$1"
   local metadata owner helper_dir
 
@@ -60,7 +60,7 @@ codex_ensure_private_pre_reviewer_state_dir() {
   [ "$metadata" = "directory|$owner|700" ]
 }
 
-codex_private_regular_file() {
+kimi_private_regular_file() {
   local path="$1"
   local metadata owner file_type file_owner file_mode link_count
 
@@ -75,13 +75,13 @@ codex_private_regular_file() {
   [ "$file_owner" = "$owner" ] && [ "$file_mode" = 600 ] && [ "$link_count" = 1 ]
 }
 
-codex_lock_pre_reviewer_turn() {
+kimi_lock_pre_reviewer_turn() {
   local state_dir="$1"
   local timeout="${KIMI_PRE_REVIEWER_LOCK_TIMEOUT:-1}"
   local path_metadata descriptor_metadata owner expected_metadata
 
   [[ "$timeout" =~ ^(0+([.][0123456789]+)?|0*1([.]0+)?)$ ]] || timeout=1
-  codex_ensure_private_pre_reviewer_state_dir "$state_dir" || return 1
+  kimi_ensure_private_pre_reviewer_state_dir "$state_dir" || return 1
   owner="$(id -u)" || return 1
   path_metadata="$(stat -c '%d:%i|%F|%u|%a' -- "$state_dir" 2>/dev/null)" || return 1
   expected_metadata="${path_metadata%%|*}|directory|$owner|700"
@@ -133,7 +133,7 @@ codex_lock_pre_reviewer_turn() {
   fi
 }
 
-codex_unlock_pre_reviewer_turn() {
+kimi_unlock_pre_reviewer_turn() {
   if [ -n "${KIMI_TURN_LOCK_FD:-}" ]; then
     flock -u "$KIMI_TURN_LOCK_FD" 2>/dev/null || true
     exec {KIMI_TURN_LOCK_FD}>&-
@@ -141,14 +141,14 @@ codex_unlock_pre_reviewer_turn() {
   fi
 }
 
-codex_prune_pre_reviewer_turn_state() {
+kimi_prune_pre_reviewer_turn_state() {
   local state_dir="$1"
   local helper_dir now path_metadata descriptor_metadata owner expected_metadata
 
   # Maintenance is deliberately outside the shared turn lock. The Python
   # pruner uses its own nonblocking lock for one bounded cursor-backed batch.
   [ -z "${KIMI_TURN_LOCK_FD:-}" ] || return 1
-  codex_ensure_private_pre_reviewer_state_dir "$state_dir" || return 1
+  kimi_ensure_private_pre_reviewer_state_dir "$state_dir" || return 1
   owner="$(id -u)" || return 1
   path_metadata="$(stat -c '%d:%i|%F|%u|%a' -- "$state_dir" 2>/dev/null)" || return 1
   expected_metadata="${path_metadata%%|*}|directory|$owner|700"

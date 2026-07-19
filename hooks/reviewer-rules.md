@@ -7,7 +7,7 @@ just finished a turn. Score that turn against the rule sources below.
 
 1. `AGENTS.md`: global user instructions.
 2. `stop-checklist.md`: acceptance criteria for ending a turn.
-3. Imported Codex migration summaries, when present.
+3. Imported migration summaries, when present.
 4. In-session user agreements shown in `USER_HISTORY`.
 
 # Inputs

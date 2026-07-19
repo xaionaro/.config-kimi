@@ -1,7 +1,7 @@
 import Spec.Utf8Prefix
 import Lean.Elab.Tactic.Omega
 
-namespace CodexHooks
+namespace KimiHooks
 
 theorem takeUtf8Chars_bytes_le (budget : Nat) (chars : List Char) :
     utf8Bytes (takeUtf8Chars budget chars) ≤ budget := by
@@ -106,4 +106,4 @@ theorem takeUtf8Prefix_next_not_fit (budget : Nat) (input : String)
   apply takeUtf8Chars_next_not_fit budget input.toList next rest
   simpa only [takeUtf8Prefix, stringMk_toList] using h
 
-end CodexHooks
+end KimiHooks

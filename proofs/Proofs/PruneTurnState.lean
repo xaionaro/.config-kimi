@@ -1,7 +1,7 @@
 import Spec.PruneTurnState
 import Lean.Elab.Tactic.Omega
 
-namespace CodexHooks
+namespace KimiHooks
 
 theorem shouldPrune_sound (name : String) (isRegular : Bool) (now modified : Int)
     (selected : shouldPrune name isRegular now modified = true) :
@@ -52,4 +52,4 @@ theorem busyPublicationLockRetainsEntry
     deleteAfterRevalidation false observedSelected currentSelected = false := by
   simp [deleteAfterRevalidation]
 
-end CodexHooks
+end KimiHooks

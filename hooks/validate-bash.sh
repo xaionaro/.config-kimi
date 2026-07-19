@@ -4,10 +4,10 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
-codex_init_tmp || true
-codex_install_fail_open_trap validate-bash
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
+kimi_init_tmp || true
+kimi_install_fail_open_trap validate-bash
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -866,7 +866,7 @@ if [ -n "$command" ] && [ "$(detect_git_push 2>/dev/null)" = "1" ]; then
 fi
 
 hook_is_subagent=false
-if codex_hook_is_subagent_context "$input"; then
+if kimi_hook_is_subagent_context "$input"; then
   hook_is_subagent=true
 fi
 
@@ -886,11 +886,11 @@ if [ -n "$command" ] && [ "$(detect_uncapped_make 2>/dev/null)" = "1" ]; then
 fi
 
 if [ "$read_only" != true ]; then
-  codex_note_touched_repo "$session_id" "$cwd" "$cwd" || true
+  kimi_note_touched_repo "$session_id" "$cwd" "$cwd" || true
 fi
 
 if [ "$hook_is_subagent" != true ] && [ "$read_only" != true ]; then
-  codex_mark_activity "$session_id" "$cwd" shell || true
+  kimi_mark_activity "$session_id" "$cwd" shell || true
 fi
 
 case "$input" in

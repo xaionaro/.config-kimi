@@ -12,11 +12,11 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-STATE = ROOT / "hooks/lib/codex-proof-state.sh"
+STATE = ROOT / "hooks/lib/kimi-proof-state.sh"
 HELPERS = (
-    "codex_hook_transcript_first_record_is_admissible",
-    "codex_hook_is_subagent_context",
-    "codex_hook_parent_session_id",
+    "kimi_hook_transcript_first_record_is_admissible",
+    "kimi_hook_is_subagent_context",
+    "kimi_hook_parent_session_id",
 )
 SUBAGENT_RECORD = (
     b'{"type":"session_meta","payload":{"source":{"subagent":'
@@ -83,15 +83,15 @@ class TranscriptAdmissionTests(unittest.TestCase):
             self.assertEqual((subagent.returncode, subagent.stdout), (0, b""))
             self.assertEqual((parent.returncode, parent.stdout), (0, b"parent-session\n"))
 
-    def test_trusted_codex_home_alias_does_not_weaken_below_root_nofollow(self) -> None:
+    def test_trusted_kimi_home_alias_does_not_weaken_below_root_nofollow(self) -> None:
         with tempfile.TemporaryDirectory(prefix="transcript-admission-") as temporary:
             root = Path(temporary)
             home = root / "home"
-            physical_codex = root / "physical-codex"
-            sessions = physical_codex / "sessions"
+            physical_kimi = root / "physical-kimi"
+            sessions = physical_kimi / "sessions"
             sessions.mkdir(parents=True)
             home.mkdir()
-            (home / ".kimi-code").symlink_to(physical_codex, target_is_directory=True)
+            (home / ".kimi-code").symlink_to(physical_kimi, target_is_directory=True)
             transcript = home / ".kimi-code/sessions/valid.jsonl"
             transcript.write_bytes(SUBAGENT_RECORD)
 

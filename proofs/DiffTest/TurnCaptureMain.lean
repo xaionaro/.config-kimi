@@ -1,7 +1,7 @@
 import Proofs.TurnCapture
 import Std
 
-open CodexHooks
+open KimiHooks
 
 def repeated (count : Nat) (char : Char) : String :=
   String.mk (List.replicate count char)

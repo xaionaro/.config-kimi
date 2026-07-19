@@ -22,7 +22,7 @@ class FormalTmpfsTests(unittest.TestCase):
             [
                 "/bin/bash",
                 "-c",
-                '. "$1"; codex_select_formal_tmpfs_scratch',
+                '. "$1"; kimi_select_formal_tmpfs_scratch',
                 "bash",
                 str(HELPER),
             ],
@@ -65,7 +65,7 @@ class FormalTmpfsTests(unittest.TestCase):
 
     def test_runner_binds_owned_formal_tmpdir_before_case_accounting(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
-        setup = source.index("codex_select_formal_tmpfs_scratch")
+        setup = source.index("kimi_select_formal_tmpfs_scratch")
         accounting = source.index("PASS_COUNT=0")
         lifecycle = source.index("test_pre_reviewer_controller_matches_lean_lifecycle")
         self.assertLess(setup, accounting)
@@ -96,7 +96,7 @@ class FormalTmpfsTests(unittest.TestCase):
             [
                 "/bin/bash",
                 "-c",
-                '. "$1"; codex_select_formal_persistent_storage',
+                '. "$1"; kimi_select_formal_persistent_storage',
                 "bash",
                 str(HELPER),
             ],
@@ -136,7 +136,7 @@ class FormalTmpfsTests(unittest.TestCase):
                         [
                             "/bin/bash",
                             "-c",
-                            '. "$1"; codex_run_formal_lifecycle_differential "$2" "$3"',
+                            '. "$1"; kimi_run_formal_lifecycle_differential "$2" "$3"',
                             "bash",
                             str(HELPER),
                             str(selected),

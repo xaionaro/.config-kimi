@@ -4,7 +4,7 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
 
 input=$(cat)
 tool_name=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)
@@ -14,7 +14,7 @@ case "$tool_name" in
   *) exit 0 ;;
 esac
 
-if codex_hook_is_subagent_context "$input"; then
+if kimi_hook_is_subagent_context "$input"; then
   exit 0
 fi
 
@@ -50,9 +50,9 @@ esac
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 [ -z "$cwd" ] && cwd="$PWD"
 
-marker="$(codex_proof_root)/$session_id/eci_active"
+marker="$(kimi_proof_root)/$session_id/eci_active"
 [ -f "$marker" ] || exit 0
-codex_note_state_session_id "$marker" "$session_id" || true
+kimi_note_state_session_id "$marker" "$session_id" || true
 
 marker_text=$(cat "$marker" 2>/dev/null || true)
 jq -n --arg reason "ECI is active for this session. Never stop until the ECI task is complete. Continue the ECI task, or report a blocker requiring user input while ECI remains active. Disengage only with clean-pass or user-closed via ~/.kimi-code/bin/eci-active off <disengage-report.md>. Marker: $marker_text" '{

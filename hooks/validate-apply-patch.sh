@@ -4,10 +4,10 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
-codex_init_tmp || true
-codex_install_fail_open_trap validate-apply-patch
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
+kimi_init_tmp || true
+kimi_install_fail_open_trap validate-apply-patch
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -39,11 +39,11 @@ patch_paths=$(printf '%s\n' "$patch_text" | awk '
   }
 ')
 
-if codex_hook_is_subagent_context "$input"; then
+if kimi_hook_is_subagent_context "$input"; then
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    resolved_path="$(codex_resolve_hook_path "${cwd:-$PWD}" "$path" 2>/dev/null || true)"
-    if [ -n "$resolved_path" ] && codex_path_is_session_ledger_file "$resolved_path"; then
+    resolved_path="$(kimi_resolve_hook_path "${cwd:-$PWD}" "$path" 2>/dev/null || true)"
+    if [ -n "$resolved_path" ] && kimi_path_is_session_ledger_file "$resolved_path"; then
       deny "Only the main thread may modify session ledger file ${path##*/}."
     fi
   done <<<"$patch_paths"
@@ -68,18 +68,18 @@ ownership_failure_deny() {
 trap 'ownership_failure_deny' ERR
 while IFS= read -r path; do
   [ -n "$path" ] || continue
-  owner_session_id="$(codex_path_owner_session_id "$path" 2>/dev/null || true)"
+  owner_session_id="$(kimi_path_owner_session_id "$path" 2>/dev/null || true)"
   [ -n "$owner_session_id" ] || continue
-  mapfile -t allowed_session_ids < <(codex_hook_allowed_session_ids "$input")
+  mapfile -t allowed_session_ids < <(kimi_hook_allowed_session_ids "$input")
   if [ "${#allowed_session_ids[@]}" -eq 0 ]; then
     deny "Session-scoped file ${path##*/} requires a current session id; none resolved. Refusing fail-open on a session-scoped path."
   fi
-  if ! codex_session_owner_allowed "$owner_session_id" "${allowed_session_ids[@]}"; then
+  if ! kimi_session_owner_allowed "$owner_session_id" "${allowed_session_ids[@]}"; then
     deny "Refusing to edit ${path##*/}: file belongs to session $owner_session_id, allowed sessions are ${allowed_session_ids[*]}."
   fi
 done <<<"$patch_paths"
 trap - ERR
-codex_install_fail_open_trap validate-apply-patch
+kimi_install_fail_open_trap validate-apply-patch
 
 if printf '%s\n' "$patch_paths" | grep -Eiq '(^|/)(import|imports|vendor|(3rd|third)[ _-]?party)(/|$)'; then
   deny 'Do not edit files under import/, imports/, vendor/, or any third-party/3rdparty variant directly. Edit the original source and revendor the files. Worst case: edit the originals and rsync them into the vendored dir.'
@@ -123,9 +123,9 @@ fi
 
 while IFS= read -r path; do
   [ -n "$path" ] || continue
-  codex_note_touched_repo "$session_id" "$cwd" "$path" || true
+  kimi_note_touched_repo "$session_id" "$cwd" "$path" || true
 done <<<"$patch_paths"
 
-if ! codex_hook_is_subagent_context "$input"; then
-  codex_mark_activity "$session_id" "$cwd" edit || true
+if ! kimi_hook_is_subagent_context "$input"; then
+  kimi_mark_activity "$session_id" "$cwd" edit || true
 fi

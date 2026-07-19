@@ -1,4 +1,4 @@
-namespace CodexHooks
+namespace KimiHooks
 
 def utf8Width (char : Char) : Nat :=
   char.toString.utf8ByteSize
@@ -18,4 +18,4 @@ def takeUtf8Chars : Nat → List Char → List Char
 def takeUtf8Prefix (budget : Nat) (input : String) : String :=
   String.mk (takeUtf8Chars budget input.toList)
 
-end CodexHooks
+end KimiHooks

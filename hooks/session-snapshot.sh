@@ -4,10 +4,10 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
-. "$HOOK_DIR/lib/codex-tmp.sh"
-codex_init_tmp || true
-codex_install_fail_open_trap session-snapshot
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-tmp.sh"
+kimi_init_tmp || true
+kimi_install_fail_open_trap session-snapshot
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -16,7 +16,7 @@ cwd=$(printf '%s' "$input" | jq -r 'if (.cwd? | type) == "string" then .cwd else
 [ -z "$cwd" ] && cwd="$PWD"
 
 # Kimi SessionStart payloads do not distinguish ephemeral side threads via a
-# codex-format transcript_path, so the snapshot runs for every session start;
+# legacy transcript_path, so the snapshot runs for every session start;
 # without a transcript the subagent/side signals below stay at their fail-safe
 # defaults.
 
@@ -24,10 +24,10 @@ case "$session_id" in
   ""|*[!A-Za-z0-9_-]*) exit 0 ;;
 esac
 
-root="$(codex_proof_root)"
-side_stop=$(codex_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
-if codex_side_stop_is_active_for_session "$side_stop" "$session_id"; then
-  codex_bind_side_stop_to_session "$side_stop" "$session_id" || true
+root="$(kimi_proof_root)"
+side_stop=$(kimi_existing_state_file side-stop side_stop "$session_id" "$cwd" 2>/dev/null || true)
+if kimi_side_stop_is_active_for_session "$side_stop" "$session_id"; then
+  kimi_bind_side_stop_to_session "$side_stop" "$session_id" || true
   exit 0
 fi
 

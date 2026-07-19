@@ -1,7 +1,7 @@
 # Shellcheck-friendly lifecycle differential scratch selection.
 # shellcheck shell=bash
 
-codex_private_formal_tmpfs_scratch() {
+kimi_private_formal_tmpfs_scratch() {
   local scratch="$1"
   local findmnt_path metadata owner filesystem
 
@@ -14,7 +14,7 @@ codex_private_formal_tmpfs_scratch() {
   [ "$metadata" = "directory|$owner|700" ] && [ "$filesystem" = tmpfs ]
 }
 
-codex_select_formal_tmpfs_scratch() {
+kimi_select_formal_tmpfs_scratch() {
   local base="${KIMI_TEST_FORMAL_TMPFS_BASE:-/tmp}"
   local findmnt_path scratch filesystem
 
@@ -30,23 +30,23 @@ codex_select_formal_tmpfs_scratch() {
     rm -rf -- "$scratch"
     return 1
   fi
-  if ! codex_private_formal_tmpfs_scratch "$scratch"; then
+  if ! kimi_private_formal_tmpfs_scratch "$scratch"; then
     rm -rf -- "$scratch"
     return 1
   fi
   printf '%s\n' "$scratch"
 }
 
-codex_run_formal_lifecycle_differential() {
+kimi_run_formal_lifecycle_differential() {
   local formal_tmp_root="$1"
   shift
 
-  codex_private_formal_tmpfs_scratch "$formal_tmp_root" || return 1
+  kimi_private_formal_tmpfs_scratch "$formal_tmp_root" || return 1
   [ -w "$formal_tmp_root" ] || return 1
   TMPDIR="$formal_tmp_root" "$@"
 }
 
-codex_select_formal_persistent_storage() {
+kimi_select_formal_persistent_storage() {
   local base="${KIMI_TEST_FORMAL_PERSISTENT_BASE:-${XDG_CACHE_HOME:-$HOME/.cache}/kimi-hooks-tests}"
   local scratch metadata owner filesystem findmnt_path
 
@@ -71,13 +71,13 @@ codex_select_formal_persistent_storage() {
   printf '%s\n' "$scratch"
 }
 
-codex_build_formal_artifact() {
+kimi_build_formal_artifact() {
   local formal_tmp_root="$1" persistent_root="$2" repository="$3"
   local watchdog="$4" log_name="$5"
   shift 5
   local build_tmp log status
 
-  codex_private_formal_tmpfs_scratch "$formal_tmp_root" || return 1
+  kimi_private_formal_tmpfs_scratch "$formal_tmp_root" || return 1
   build_tmp="$(mktemp -d "$formal_tmp_root/build.XXXXXX")" || return 1
   mkdir -p "$persistent_root/logs" || { rm -rf -- "$build_tmp"; return 1; }
   log="$persistent_root/logs/$log_name"

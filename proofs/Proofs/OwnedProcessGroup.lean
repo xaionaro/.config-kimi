@@ -1,6 +1,6 @@
 import Spec.OwnedProcessGroup
 
-namespace CodexHooks
+namespace KimiHooks
 
 theorem owned_group_order_reaches_observation_only_absence :
     ownedGroupRun [
@@ -59,4 +59,4 @@ theorem wrong_parent_containment_fails_closed
   cases linux <;> cases parentDeathVerified <;> cases subreaperVerified <;>
     cases pidfdVerified <;> cases controlCloseOnExec <;> rfl
 
-end CodexHooks
+end KimiHooks

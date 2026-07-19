@@ -201,17 +201,17 @@ import sys
 
 prompt = open(sys.argv[1], encoding="utf-8").read()
 turn_state = open(sys.argv[2], encoding="utf-8").read()
-unlock = prompt.find("codex_unlock_pre_reviewer_turn\n        codex_prune_pre_reviewer_turn_state")
+unlock = prompt.find("kimi_unlock_pre_reviewer_turn\n        kimi_prune_pre_reviewer_turn_state")
 guard = '[ -z "${KIMI_TURN_LOCK_FD:-}" ] || return 1'
 print("0" if unlock >= 0 and guard in turn_state else "1")
 PY
   )" || { rm -rf -- "$state_dir"; return 1; }
   if ! env -i PATH=/usr/bin:/bin HOME="${HOME:-/tmp}" bash -c '
       . "$1"
-      codex_lock_pre_reviewer_turn "$2" || exit 1
-      if codex_prune_pre_reviewer_turn_state "$2"; then exit 1; fi
-      codex_unlock_pre_reviewer_turn
-      codex_prune_pre_reviewer_turn_state "$2"' \
+      kimi_lock_pre_reviewer_turn "$2" || exit 1
+      if kimi_prune_pre_reviewer_turn_state "$2"; then exit 1; fi
+      kimi_unlock_pre_reviewer_turn
+      kimi_prune_pre_reviewer_turn_state "$2"' \
       bash "$TURN_STATE" "$state_dir"; then
     maintenance_shared_lock=1
   fi

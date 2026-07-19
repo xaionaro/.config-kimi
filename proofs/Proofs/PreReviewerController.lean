@@ -1,6 +1,6 @@
 import Spec.PreReviewerController
 
-namespace CodexHooks
+namespace KimiHooks
 
 def confirmationSafe (state : ControllerState) : Prop :=
   state.publicationConfirmed = true →
@@ -276,4 +276,4 @@ theorem accepted_profile_separates_fresh_build_from_reuse
   simp [profileEvidenceAccepted] at accepted
   exact ⟨accepted.1.2, accepted.2⟩
 
-end CodexHooks
+end KimiHooks

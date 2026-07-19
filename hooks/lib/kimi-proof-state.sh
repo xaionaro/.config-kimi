@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Shared state helpers for Kimi proof-adjacent hooks.
 
-codex_proof_root() {
+kimi_proof_root() {
   printf '%s\n' "${KIMI_PROOF_ROOT:-$HOME/.cache/kimi-proof}"
 }
 
-codex_valid_session_id() {
+kimi_valid_session_id() {
   case "${1:-}" in
     ""|*[!A-Za-z0-9_-]*) return 1 ;;
     *) return 0 ;;
@@ -15,7 +15,7 @@ codex_valid_session_id() {
 # Reserved proof-root entries: bare names are fixed state directories;
 # *-suffixed globs are per-session file families that must never be read
 # as session directories.
-codex_reserved_proof_dir() {
+kimi_reserved_proof_dir() {
   case "${1:-}" in
     activity|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|kimi-wire-warnings-*|side-stop|skip-stop|skills)
       return 0
@@ -26,22 +26,22 @@ codex_reserved_proof_dir() {
   esac
 }
 
-codex_real_session_dir_name() {
+kimi_real_session_dir_name() {
   [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
 }
 
-codex_proof_alias_session_id() {
+kimi_proof_alias_session_id() {
   local dir="$1"
   local marker session_id
 
   marker="$dir/.kimi-proof-alias"
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   session_id="$(awk -F':[[:space:]]*' '$1 == "session_id" { print $2; exit }' "$marker" 2>/dev/null | tr -d '\r')"
-  codex_valid_session_id "$session_id" || return 1
+  kimi_valid_session_id "$session_id" || return 1
   printf '%s\n' "$session_id"
 }
 
-codex_canonical_cwd() {
+kimi_canonical_cwd() {
   local cwd="${1:-$PWD}"
   if [ -d "$cwd" ]; then
     (cd "$cwd" 2>/dev/null && pwd -P) || printf '%s\n' "$cwd"
@@ -50,7 +50,7 @@ codex_canonical_cwd() {
   fi
 }
 
-codex_resolve_hook_path() {
+kimi_resolve_hook_path() {
   local cwd="${1:-$PWD}"
   local path="${2:-}"
 
@@ -68,14 +68,14 @@ codex_resolve_hook_path() {
   realpath -m -- "$path" 2>/dev/null || printf '%s\n' "$path"
 }
 
-codex_session_ledger_basenames() {
+kimi_session_ledger_basenames() {
   printf '%s\n' \
     "project-understanding.md" \
     "high_level_log.md" \
     "latest-status-report.md"
 }
 
-codex_session_ledger_basename() {
+kimi_session_ledger_basename() {
   case "${1:-}" in
     project-understanding.md|high_level_log.md|latest-status-report.md)
       return 0
@@ -86,16 +86,16 @@ codex_session_ledger_basename() {
   esac
 }
 
-codex_path_is_session_ledger_file() {
+kimi_path_is_session_ledger_file() {
   local path="$1"
   local actual_root default_root root rest sid filename
 
   [ -n "$path" ] || return 1
   filename="${path##*/}"
-  codex_session_ledger_basename "$filename" || return 1
+  kimi_session_ledger_basename "$filename" || return 1
 
-  actual_root="$(codex_resolve_hook_path "$PWD" "$(codex_proof_root)" 2>/dev/null || codex_proof_root)"
-  default_root="$(codex_resolve_hook_path "$PWD" "$HOME/.cache/kimi-proof" 2>/dev/null || printf '%s\n' "$HOME/.cache/kimi-proof")"
+  actual_root="$(kimi_resolve_hook_path "$PWD" "$(kimi_proof_root)" 2>/dev/null || kimi_proof_root)"
+  default_root="$(kimi_resolve_hook_path "$PWD" "$HOME/.cache/kimi-proof" 2>/dev/null || printf '%s\n' "$HOME/.cache/kimi-proof")"
   for root in "$actual_root" "$default_root"; do
     [ -n "$root" ] || continue
     case "$path" in
@@ -104,8 +104,8 @@ codex_path_is_session_ledger_file() {
         sid="${rest%%/*}"
         [ "$rest" != "$sid" ] || continue
         [ "${rest#*/}" = "$filename" ] || continue
-        codex_reserved_proof_dir "$sid" && continue
-        codex_valid_session_id "$sid" || continue
+        kimi_reserved_proof_dir "$sid" && continue
+        kimi_valid_session_id "$sid" || continue
         return 0
         ;;
     esac
@@ -114,7 +114,7 @@ codex_path_is_session_ledger_file() {
   return 1
 }
 
-codex_hash_string() {
+kimi_hash_string() {
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "${1:-}" | sha256sum | awk '{print $1}'
   elif command -v python3 >/dev/null 2>&1; then
@@ -125,120 +125,120 @@ codex_hash_string() {
   fi
 }
 
-codex_cwd_key() {
+kimi_cwd_key() {
   local cwd
-  cwd="$(codex_canonical_cwd "${1:-$PWD}")"
-  codex_hash_string "$cwd"
+  cwd="$(kimi_canonical_cwd "${1:-$PWD}")"
+  kimi_hash_string "$cwd"
 }
 
-codex_session_state_dir() {
+kimi_session_state_dir() {
   local kind="$1"
   local session_id="$2"
-  codex_valid_session_id "$session_id" || return 1
-  printf '%s/%s/sessions/%s\n' "$(codex_proof_root)" "$kind" "$session_id"
+  kimi_valid_session_id "$session_id" || return 1
+  printf '%s/%s/sessions/%s\n' "$(kimi_proof_root)" "$kind" "$session_id"
 }
 
-codex_cwd_state_dir() {
+kimi_cwd_state_dir() {
   local kind="$1"
   local cwd="${2:-$PWD}"
-  printf '%s/%s/cwd/%s\n' "$(codex_proof_root)" "$kind" "$(codex_cwd_key "$cwd")"
+  printf '%s/%s/cwd/%s\n' "$(kimi_proof_root)" "$kind" "$(kimi_cwd_key "$cwd")"
 }
 
-codex_ensure_cwd_state_dir() {
+kimi_ensure_cwd_state_dir() {
   local kind="$1"
   local cwd="${2:-$PWD}"
   local dir
-  dir="$(codex_cwd_state_dir "$kind" "$cwd")" || return 1
+  dir="$(kimi_cwd_state_dir "$kind" "$cwd")" || return 1
   mkdir -p "$dir" || return 1
-  codex_canonical_cwd "$cwd" >"$dir/cwd"
+  kimi_canonical_cwd "$cwd" >"$dir/cwd"
   printf '%s\n' "$dir"
 }
 
-codex_cli_state_dir() {
+kimi_cli_state_dir() {
   local kind="$1"
   local create="${2:-false}"
   local dir
 
   if [ -n "${KIMI_SESSION_ID:-}" ]; then
-    dir="$(codex_session_state_dir "$kind" "$KIMI_SESSION_ID")" || return 1
+    dir="$(kimi_session_state_dir "$kind" "$KIMI_SESSION_ID")" || return 1
     [ "$create" = "true" ] && mkdir -p "$dir"
     printf '%s\n' "$dir"
     return 0
   fi
 
   if [ "$create" = "true" ]; then
-    codex_ensure_cwd_state_dir "$kind" "$PWD"
+    kimi_ensure_cwd_state_dir "$kind" "$PWD"
   else
-    codex_cwd_state_dir "$kind" "$PWD"
+    kimi_cwd_state_dir "$kind" "$PWD"
   fi
 }
 
-codex_cli_state_file() {
+kimi_cli_state_file() {
   local kind="$1"
   local filename="$2"
   local create="${3:-false}"
   local dir
-  dir="$(codex_cli_state_dir "$kind" "$create")" || return 1
+  dir="$(kimi_cli_state_dir "$kind" "$create")" || return 1
   printf '%s/%s\n' "$dir" "$filename"
 }
 
-codex_existing_state_file() {
+kimi_existing_state_file() {
   local kind="$1"
   local filename="$2"
   local session_id="${3:-}"
   local cwd="${4:-}"
   local dir path
 
-  if codex_valid_session_id "$session_id"; then
-    dir="$(codex_session_state_dir "$kind" "$session_id")" || return 1
+  if kimi_valid_session_id "$session_id"; then
+    dir="$(kimi_session_state_dir "$kind" "$session_id")" || return 1
     path="$dir/$filename"
     [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
   fi
 
   if [ -n "$cwd" ]; then
-    dir="$(codex_cwd_state_dir "$kind" "$cwd")" || return 1
+    dir="$(kimi_cwd_state_dir "$kind" "$cwd")" || return 1
     path="$dir/$filename"
     [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
   fi
 
-  if codex_valid_session_id "$session_id"; then
-    path="$(codex_proof_root)/$session_id/$filename"
+  if kimi_valid_session_id "$session_id"; then
+    path="$(kimi_proof_root)/$session_id/$filename"
     [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
   fi
 
   return 1
 }
 
-codex_state_session_id() {
+kimi_state_session_id() {
   local file="$1"
   awk -F':[[:space:]]*' '$1 == "session_id" { print $2; exit }' "$file" 2>/dev/null
 }
 
-codex_note_state_session_id() {
+kimi_note_state_session_id() {
   local file="$1"
   local session_id="$2"
   local existing
 
-  codex_valid_session_id "$session_id" || return 0
+  kimi_valid_session_id "$session_id" || return 0
   [ -f "$file" ] || return 0
-  existing="$(codex_state_session_id "$file" || true)"
+  existing="$(kimi_state_session_id "$file" || true)"
   [ -n "$existing" ] && return 0
   printf 'session_id: %s\n' "$session_id" >>"$file"
 }
 
-codex_mark_activity() {
+kimi_mark_activity() {
   local session_id="$1"
   local cwd="$2"
   local marker_name="$3"
   local dir marker
 
-  codex_valid_session_id "$session_id" || return 0
+  kimi_valid_session_id "$session_id" || return 0
   case "$marker_name" in
     shell|edit|subagent) ;;
     *) return 0 ;;
   esac
 
-  dir="$(codex_session_state_dir activity "$session_id")" || return 0
+  dir="$(kimi_session_state_dir activity "$session_id")" || return 0
   mkdir -p "$dir" || return 0
   marker="$dir/$marker_name"
   {
@@ -248,7 +248,7 @@ codex_mark_activity() {
   } >"$marker"
 }
 
-codex_git_repo_root_for_path() {
+kimi_git_repo_root_for_path() {
   local cwd="${1:-$PWD}"
   local path="${2:-}"
   local target dir repo
@@ -274,10 +274,10 @@ codex_git_repo_root_for_path() {
 
   repo="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
   [ -n "$repo" ] || return 1
-  codex_canonical_cwd "$repo"
+  kimi_canonical_cwd "$repo"
 }
 
-codex_repo_relative_file_path() {
+kimi_repo_relative_file_path() {
   local repo="$1"
   local cwd="${2:-$PWD}"
   local path="${3:-}"
@@ -298,20 +298,20 @@ codex_repo_relative_file_path() {
   printf '%s\n' "$rel"
 }
 
-codex_note_touched_repo() {
+kimi_note_touched_repo() {
   local session_id="$1"
   local cwd="${2:-$PWD}"
   local path="${3:-}"
   local repo dir marker key head status status_sha tmp rel_path
 
-  codex_valid_session_id "$session_id" || return 0
-  repo="$(codex_git_repo_root_for_path "$cwd" "$path" 2>/dev/null || true)"
+  kimi_valid_session_id "$session_id" || return 0
+  repo="$(kimi_git_repo_root_for_path "$cwd" "$path" 2>/dev/null || true)"
   [ -n "$repo" ] || return 0
-  rel_path="$(codex_repo_relative_file_path "$repo" "$cwd" "$path" 2>/dev/null || true)"
+  rel_path="$(kimi_repo_relative_file_path "$repo" "$cwd" "$path" 2>/dev/null || true)"
 
-  dir="$(codex_session_state_dir touched-repos "$session_id")" || return 0
+  dir="$(kimi_session_state_dir touched-repos "$session_id")" || return 0
   mkdir -p "$dir" || return 0
-  key="$(codex_cwd_key "$repo")"
+  key="$(kimi_cwd_key "$repo")"
   marker="$dir/$key"
   if [ -f "$marker" ]; then
     if [ -n "$rel_path" ]; then
@@ -324,7 +324,7 @@ codex_note_touched_repo() {
 
   head="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
   status="$(git -C "$repo" status --porcelain=v1 --untracked-files=normal 2>/dev/null || true)"
-  status_sha="$(codex_hash_string "$status")"
+  status_sha="$(kimi_hash_string "$status")"
   tmp="$marker.tmp.$$"
   {
     printf 'repo: %s\n' "$repo"
@@ -339,30 +339,30 @@ codex_note_touched_repo() {
   } >"$tmp" && mv "$tmp" "$marker"
 }
 
-codex_state_value() {
+kimi_state_value() {
   local file="$1"
   local key="$2"
   awk -F':[[:space:]]*' -v key="$key" '$1 == key { print $2; exit }' "$file" 2>/dev/null
 }
 
-codex_legacy_eci_markers_for_cwd() {
+kimi_legacy_eci_markers_for_cwd() {
   local cwd="${1:-}"
   local root marker dir name marker_cwd canonical_cwd canonical_marker_cwd found=false
 
   [ -n "$cwd" ] || return 1
-  root="$(codex_proof_root)"
+  root="$(kimi_proof_root)"
   [ -d "$root" ] || return 1
-  canonical_cwd="$(codex_canonical_cwd "$cwd")"
+  canonical_cwd="$(kimi_canonical_cwd "$cwd")"
 
   shopt -s nullglob
   for marker in "$root"/*/eci_active; do
     [ -f "$marker" ] || continue
     dir="${marker%/*}"
     name="${dir##*/}"
-    codex_reserved_proof_dir "$name" || continue
-    marker_cwd="$(codex_state_value "$marker" cwd || true)"
+    kimi_reserved_proof_dir "$name" || continue
+    marker_cwd="$(kimi_state_value "$marker" cwd || true)"
     [ -n "$marker_cwd" ] || continue
-    canonical_marker_cwd="$(codex_canonical_cwd "$marker_cwd")"
+    canonical_marker_cwd="$(kimi_canonical_cwd "$marker_cwd")"
     [ "$canonical_marker_cwd" = "$canonical_cwd" ] || continue
     printf '%s\n' "$marker"
     found=true
@@ -372,17 +372,17 @@ codex_legacy_eci_markers_for_cwd() {
   [ "$found" = true ]
 }
 
-codex_side_stop_applies_to_session() {
+kimi_side_stop_applies_to_session() {
   local file="$1"
   local session_id="$2"
   local command parent_session_id
 
   [ -f "$file" ] || return 1
-  command="$(codex_state_value "$file" command || true)"
+  command="$(kimi_state_value "$file" command || true)"
   [ "$command" = "/side" ] || return 1
 
-  parent_session_id="$(codex_state_value "$file" parent_session_id || true)"
-  if codex_valid_session_id "$parent_session_id"; then
+  parent_session_id="$(kimi_state_value "$file" parent_session_id || true)"
+  if kimi_valid_session_id "$parent_session_id"; then
     [ "$parent_session_id" != "$session_id" ]
     return
   fi
@@ -390,43 +390,43 @@ codex_side_stop_applies_to_session() {
   return 0
 }
 
-codex_state_file_is_session_scoped() {
+kimi_state_file_is_session_scoped() {
   local kind="$1"
   local filename="$2"
   local session_id="$3"
   local file="$4"
   local expected
 
-  expected="$(codex_session_state_dir "$kind" "$session_id" 2>/dev/null || true)"
+  expected="$(kimi_session_state_dir "$kind" "$session_id" 2>/dev/null || true)"
   [ -n "$expected" ] && [ "$file" = "$expected/$filename" ]
 }
 
-codex_side_stop_is_active_for_session() {
+kimi_side_stop_is_active_for_session() {
   local file="$1"
   local session_id="$2"
 
   [ -n "$file" ] && [ -f "$file" ] || return 1
-  codex_side_stop_applies_to_session "$file" "$session_id" || return 1
+  kimi_side_stop_applies_to_session "$file" "$session_id" || return 1
 
-  if codex_state_file_is_session_scoped side-stop side_stop "$session_id" "$file"; then
+  if kimi_state_file_is_session_scoped side-stop side_stop "$session_id" "$file"; then
     return 0
   fi
 
   [ -n "$(find "$file" -mmin -60 -print 2>/dev/null)" ]
 }
 
-codex_bind_side_stop_to_session() {
+kimi_bind_side_stop_to_session() {
   local file="$1"
   local session_id="$2"
   local dir
 
   [ -f "$file" ] || return 1
-  dir="$(codex_session_state_dir side-stop "$session_id")" || return 1
+  dir="$(kimi_session_state_dir side-stop "$session_id")" || return 1
   mkdir -p "$dir" || return 1
   cp "$file" "$dir/side_stop"
 }
 
-codex_hook_transcript_first_record() {
+kimi_hook_transcript_first_record() {
   local input="${1:-}"
   local first_record
 
@@ -436,11 +436,11 @@ codex_hook_transcript_first_record() {
   printf '%s\n' "$first_record"
 }
 
-codex_hook_is_subagent_context() {
+kimi_hook_is_subagent_context() {
   local input="${1:-}"
   local first_record
 
-  if first_record="$(codex_hook_transcript_first_record "$input")"; then
+  if first_record="$(kimi_hook_transcript_first_record "$input")"; then
     if printf '%s' "$first_record" | jq -e '
       .type == "session_meta" and
       (.payload.source.subagent.thread_spawn? != null)
@@ -448,7 +448,7 @@ codex_hook_is_subagent_context() {
       return 0
     fi
   fi
-  codex_hook_is_subagent_context_kimi "$input"
+  kimi_hook_is_subagent_context_wire "$input"
 }
 
 # Kimi-native subagent detection. Kimi hook payloads carry no transcript_path
@@ -492,7 +492,7 @@ codex_hook_is_subagent_context() {
 #    "already running and cannot run concurrently" spawn error with no
 #    agent loop, hence no Stop hook). If one ever occurs it classifies as
 #    main in this window, and the Stop gate's active-work exemption
-#    (codex_hook_kimi_session_has_active_work: open call age <6 h, no
+#    (kimi_session_has_active_work: open call age <6 h, no
 #    floor) then continues the stop under own and legacy markers alike
 #    instead of blocking it; genuine subagent stops are unaffected
 #    because the subagent branch never consults the exemption. No
@@ -513,9 +513,9 @@ KIMI_WIRE_OPEN_CALL_CEILING_MS=21600000
 KIMI_TASK_DEFAULT_TIMEOUT_MS=10800000
 KIMI_TASK_DEADLINE_GRACE_MS=300000
 
-codex_hook_kimi_session_dir() {
+kimi_session_dir_for_id() {
   local sid="$1" root="${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" d
-  codex_valid_session_id "$sid" || return 1
+  kimi_valid_session_id "$sid" || return 1
   for d in "$root"/*/"$sid"; do
     [ -d "$d" ] || continue
     printf '%s\n' "$d"
@@ -524,11 +524,11 @@ codex_hook_kimi_session_dir() {
   return 1
 }
 
-codex_kimi_wire_security_warning() {
+kimi_wire_security_warning() {
   local sid="$1" kind="$2" file
-  codex_valid_session_id "$sid" || return 0
-  mkdir -p "$(codex_proof_root)" 2>/dev/null || true
-  file="$(codex_proof_root)/kimi-wire-warnings-$sid.jsonl"
+  kimi_valid_session_id "$sid" || return 0
+  mkdir -p "$(kimi_proof_root)" 2>/dev/null || true
+  file="$(kimi_proof_root)/kimi-wire-warnings-$sid.jsonl"
   if [ -f "$file" ] && grep -qF "\"$kind\"" "$file" 2>/dev/null; then
     return 0
   fi
@@ -570,18 +570,18 @@ kimi_wire_open_call_age() {
   ' "$wire"
 }
 
-codex_hook_is_subagent_context_kimi() {
+kimi_hook_is_subagent_context_wire() {
   local input="${1:-}" sid session_dir wire now_ms
 
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
   [ -n "$sid" ] || return 1
-  session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
+  session_dir=$(kimi_session_dir_for_id "$sid") || return 1
   wire="$session_dir/agents/main/wire.jsonl"
   [ -f "$wire" ] || return 1
 
   # Format canary: unknown wire protocol → fail closed + warn once per kind.
   if ! head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"'; then
-    codex_kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
+    kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
     return 1
   fi
 
@@ -602,12 +602,12 @@ codex_hook_is_subagent_context_kimi() {
 # [0, 3000 ms): a main stop that fresh with an open call is the designed
 # turn-ends-around-a-live-agent case. Any signal failure returns 1 (no
 # active work), keeping deny-gates fail-closed.
-codex_hook_kimi_session_has_active_work() {
+kimi_session_has_active_work() {
   local input="${1:-}" sid session_dir wire now_ms
   local task_json status started timeout deadline
   sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
   [ -n "$sid" ] || return 1
-  session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
+  session_dir=$(kimi_session_dir_for_id "$sid") || return 1
   now_ms=$(( $(date +%s%N) / 1000000 ))
 
   # Background half: detached tasks (agents and bash) via tasks/*.json.
@@ -636,29 +636,29 @@ codex_hook_kimi_session_has_active_work() {
   kimi_wire_open_call_age "$wire" 0 "$now_ms"
 }
 
-codex_hook_transcript_first_record_is_admissible() {
+kimi_hook_transcript_first_record_is_admissible() {
   local input="${1:-}"
 
-  codex_hook_transcript_first_record "$input" >/dev/null
+  kimi_hook_transcript_first_record "$input" >/dev/null
 }
 
-codex_hook_parent_session_id() {
+kimi_hook_parent_session_id() {
   local input="${1:-}"
   local first_record
 
-  first_record="$(codex_hook_transcript_first_record "$input")" || return 1
+  first_record="$(kimi_hook_transcript_first_record "$input")" || return 1
   printf '%s' "$first_record" | jq -r '
     .payload.source.subagent.thread_spawn.parent_thread_id // empty
   ' 2>/dev/null
 }
 
-codex_path_owner_session_id() {
+kimi_path_owner_session_id() {
   local path="$1"
   local root default_root rest sid base alias_session_id
 
   [ -n "$path" ] || return 1
 
-  root="$(codex_proof_root)"
+  root="$(kimi_proof_root)"
   default_root="$HOME/.cache/kimi-proof"
   for root in "$root" "$default_root"; do
     [ -n "$root" ] || continue
@@ -666,15 +666,15 @@ codex_path_owner_session_id() {
       "$root"/*)
         rest="${path#"$root"/}"
         sid="${rest%%/*}"
-        codex_reserved_proof_dir "$sid" && return 1
-        if ! codex_real_session_dir_name "$sid"; then
-          alias_session_id="$(codex_proof_alias_session_id "$root/$sid" 2>/dev/null || true)"
+        kimi_reserved_proof_dir "$sid" && return 1
+        if ! kimi_real_session_dir_name "$sid"; then
+          alias_session_id="$(kimi_proof_alias_session_id "$root/$sid" 2>/dev/null || true)"
           if [ -n "$alias_session_id" ]; then
             printf '%s\n' "$alias_session_id"
             return 0
           fi
         fi
-        codex_valid_session_id "$sid" || return 1
+        kimi_valid_session_id "$sid" || return 1
         printf '%s\n' "$sid"
         return 0
         ;;
@@ -685,7 +685,7 @@ codex_path_owner_session_id() {
     "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions/"*.jsonl)
       base="${path##*/}"
       sid="$(printf '%s\n' "$base" | sed -nE 's/^rollout-[0-9T:-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/\1/p')"
-      if codex_valid_session_id "$sid"; then
+      if kimi_valid_session_id "$sid"; then
         printf '%s\n' "$sid"
         return 0
       fi
@@ -695,22 +695,22 @@ codex_path_owner_session_id() {
   return 1
 }
 
-codex_hook_allowed_session_ids() {
+kimi_hook_allowed_session_ids() {
   local input="$1"
   local session_id parent_session_id
 
   session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
-  if codex_valid_session_id "$session_id"; then
+  if kimi_valid_session_id "$session_id"; then
     printf '%s\n' "$session_id"
   fi
 
-  parent_session_id="$(codex_hook_parent_session_id "$input" 2>/dev/null || true)"
-  if codex_valid_session_id "$parent_session_id" && [ "$parent_session_id" != "$session_id" ]; then
+  parent_session_id="$(kimi_hook_parent_session_id "$input" 2>/dev/null || true)"
+  if kimi_valid_session_id "$parent_session_id" && [ "$parent_session_id" != "$session_id" ]; then
     printf '%s\n' "$parent_session_id"
   fi
 }
 
-codex_session_owner_allowed() {
+kimi_session_owner_allowed() {
   local owner="$1"
   local allowed
   shift
@@ -721,25 +721,25 @@ codex_session_owner_allowed() {
   return 1
 }
 
-codex_remove_session_state_file() {
+kimi_remove_session_state_file() {
   local kind="$1"
   local filename="$2"
   local session_id="$3"
   local dir
-  dir="$(codex_session_state_dir "$kind" "$session_id")" || return 0
+  dir="$(kimi_session_state_dir "$kind" "$session_id")" || return 0
   rm -f "$dir/$filename"
 }
 
-codex_remove_cwd_state_file() {
+kimi_remove_cwd_state_file() {
   local kind="$1"
   local filename="$2"
   local cwd="${3:-$PWD}"
   local dir
-  dir="$(codex_cwd_state_dir "$kind" "$cwd")" || return 0
+  dir="$(kimi_cwd_state_dir "$kind" "$cwd")" || return 0
   rm -f "$dir/$filename"
 }
 
-codex_markdown_section_has_body() {
+kimi_markdown_section_has_body() {
   local file="$1"
   local target="$2"
 
@@ -767,7 +767,7 @@ codex_markdown_section_has_body() {
   ' "$file"
 }
 
-codex_eci_terminal_verdict_error() {
+kimi_eci_terminal_verdict_error() {
   local subject="$1"
   local file="$2"
   local counts accepted retired

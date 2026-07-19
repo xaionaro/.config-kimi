@@ -7,7 +7,7 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$HOOK_DIR/lib/codex-proof-state.sh"
+. "$HOOK_DIR/lib/kimi-proof-state.sh"
 
 input=$(cat)
 tool_name=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)
@@ -24,7 +24,7 @@ case "$file_path" in
 esac
 
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
-codex_valid_session_id "$session_id" || exit 0
+kimi_valid_session_id "$session_id" || exit 0
 
 shopt -s nullglob
 wires=( "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions"/*/"$session_id"/agents/*/wire.jsonl )
