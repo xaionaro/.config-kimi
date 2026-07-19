@@ -1515,11 +1515,16 @@ test_stop_gate_kimi_floor_legacy_marker() {
     "$FIXTURES/stop-basic.json" >"$input"
   out="$TMP_ROOT/stop-kimi-floor-legacy.out"
 
-  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  write_kimi_main_wire "$wire" Agent yes 2500 || return 1
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
     HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
   is_stop_block "$out" &&
     json_field_contains "$out" '.reason // empty' "$proof_root/pre-reviewer/eci_active" || return 1
+
+  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true" || return 1
 
   write_kimi_main_wire "$wire" Agent no 3500 || return 1
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
@@ -1540,11 +1545,16 @@ test_stop_gate_kimi_own_marker_blocks_any_age() {
     "$FIXTURES/stop-basic.json" >"$input"
   out="$TMP_ROOT/stop-kimi-own-marker.out"
 
-  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  write_kimi_main_wire "$wire" Agent yes 2500 || return 1
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
     HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
   is_stop_block "$out" &&
     json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active" || return 1
+
+  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true" || return 1
 
   write_kimi_main_wire "$wire" Agent no 3500 || return 1
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
@@ -1576,6 +1586,174 @@ test_stop_gate_kimi_wire_warnings_note() {
     HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
   is_stop_block "$out" &&
     json_field_not_contains "$out" '.reason // empty' "kimi-wire-warnings"
+}
+
+test_stop_gate_kimi_running_task_json_allows_stop() {
+  local proof_root dir tasks_dir wire input out now_ms
+  proof_root="$(fresh_proof_root stop-kimi-task-running)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  tasks_dir="$dir/agents/main/tasks"
+  mkdir -p "$tasks_dir" || return 1
+  rm -f "$tasks_dir"/*.json 2>/dev/null || true
+  input="$TMP_ROOT/stop-kimi-task-running.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-task-running.out"
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+
+  write_kimi_main_wire "$wire" Agent yes || return 1
+  printf '{"taskId":"agent-t1","status":"running","startedAt":%s,"timeoutMs":7200000,"kind":"agent"}\n' \
+    "$(( now_ms - 60000 ))" >"$tasks_dir/agent-t1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true" || return 1
+
+  rm -f "$tasks_dir/agent-t1.json" || return 1
+  printf '{"taskId":"bash-b1","status":"running","startedAt":%s,"timeoutMs":1800000,"kind":"process"}\n' \
+    "$(( now_ms - 60000 ))" >"$tasks_dir/bash-b1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true"
+}
+
+test_stop_gate_kimi_expired_task_json_still_blocks() {
+  local proof_root dir tasks_dir wire input out now_ms
+  proof_root="$(fresh_proof_root stop-kimi-task-expired)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  tasks_dir="$dir/agents/main/tasks"
+  mkdir -p "$tasks_dir" || return 1
+  rm -f "$tasks_dir"/*.json 2>/dev/null || true
+  input="$TMP_ROOT/stop-kimi-task-expired.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-task-expired.out"
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+
+  write_kimi_main_wire "$wire" Agent yes || return 1
+  printf '{"taskId":"agent-t1","status":"running","startedAt":%s,"timeoutMs":3600000,"kind":"agent"}\n' \
+    "$(( now_ms - 28800000 ))" >"$tasks_dir/agent-t1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active"
+}
+
+test_stop_gate_kimi_terminal_task_statuses_block() {
+  local proof_root dir tasks_dir wire input out status
+  proof_root="$(fresh_proof_root stop-kimi-task-terminal)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  tasks_dir="$dir/agents/main/tasks"
+  mkdir -p "$tasks_dir" || return 1
+  rm -f "$tasks_dir"/*.json 2>/dev/null || true
+  input="$TMP_ROOT/stop-kimi-task-terminal.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-task-terminal.out"
+
+  write_kimi_main_wire "$wire" Agent yes || return 1
+  for status in completed failed lost timed_out killed; do
+    printf '{"taskId":"agent-t1","status":"%s","startedAt":%s,"timeoutMs":7200000,"kind":"agent"}\n' \
+      "$status" "$(( $(date +%s%N) / 1000000 - 60000 ))" >"$tasks_dir/agent-t1.json" || return 1
+    run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+      HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+    is_stop_block "$out" || return 1
+  done
+}
+
+test_stop_gate_ate_execution_active_work_allows_stop() {
+  local proof_root repo dir tasks_dir wire input out now_ms
+  proof_root="$(fresh_proof_root stop-ate-active-work)"
+  repo="$(make_git_repo stop-ate-active-work)" || return 1
+  mkdir -p "$proof_root/ate/sessions/session_kimi-probe"
+  printf 'phase: execution\n' >"$proof_root/ate/sessions/session_kimi-probe/ate_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  tasks_dir="$dir/agents/main/tasks"
+  mkdir -p "$tasks_dir" || return 1
+  rm -f "$tasks_dir"/*.json 2>/dev/null || true
+  input="$TMP_ROOT/stop-ate-active-work.json"
+  jq --arg cwd "$repo" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-ate-active-work.out"
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+
+  write_kimi_main_wire "$wire" Agent yes || return 1
+  printf '{"taskId":"agent-t1","status":"running","startedAt":%s,"timeoutMs":7200000,"kind":"agent"}\n' \
+    "$(( now_ms - 60000 ))" >"$tasks_dir/agent-t1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true" || return 1
+
+  rm -f "$tasks_dir/agent-t1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "ATE is active"
+}
+
+test_stop_gate_kimi_open_call_age_bounds_stop() {
+  local proof_root dir wire input out
+  proof_root="$(fresh_proof_root stop-kimi-open-bounds)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  rm -rf "$dir/agents/main/tasks" 2>/dev/null || true
+  input="$TMP_ROOT/stop-kimi-open-bounds.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-open-bounds.out"
+
+  write_kimi_main_wire "$wire" Agent no 500 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  json_field_equals "$out" '.continue // false' "true" || return 1
+
+  write_kimi_main_wire "$wire" Agent no 25200000 || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active"
+}
+
+test_stop_gate_kimi_subagent_stop_never_exempted() {
+  local proof_root dir tasks_dir wire input out now_ms
+  proof_root="$(fresh_proof_root stop-kimi-subagent-never)"
+  mkdir -p "$proof_root/session_kimi-probe"
+  printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
+
+  dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
+  wire="$dir/agents/main/wire.jsonl"
+  tasks_dir="$dir/agents/main/tasks"
+  mkdir -p "$tasks_dir" || return 1
+  rm -f "$tasks_dir"/*.json 2>/dev/null || true
+  input="$TMP_ROOT/stop-kimi-subagent-never.json"
+  jq --arg cwd "$ROOT" '.cwd = $cwd | .session_id = "session_kimi-probe"' \
+    "$FIXTURES/stop-basic.json" >"$input"
+  out="$TMP_ROOT/stop-kimi-subagent-never.out"
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+
+  write_kimi_main_wire "$wire" Agent no 3500 || return 1
+  printf '{"taskId":"agent-t1","status":"running","startedAt":%s,"timeoutMs":7200000,"kind":"agent"}\n' \
+    "$(( now_ms - 60000 ))" >"$tasks_dir/agent-t1.json" || return 1
+  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+  is_stop_block "$out" &&
+    json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active"
 }
 
 write_main_transcript() {
@@ -7493,6 +7671,18 @@ run_case "stop gate kimi own marker blocks any age" \
   test_stop_gate_kimi_own_marker_blocks_any_age
 run_case "stop gate block reason names kimi wire warnings file" \
   test_stop_gate_kimi_wire_warnings_note
+run_case "stop gate kimi running task json allows stop" \
+  test_stop_gate_kimi_running_task_json_allows_stop
+run_case "stop gate kimi expired task json still blocks" \
+  test_stop_gate_kimi_expired_task_json_still_blocks
+run_case "stop gate kimi terminal task statuses block" \
+  test_stop_gate_kimi_terminal_task_statuses_block
+run_case "stop gate ATE execution active work allows stop" \
+  test_stop_gate_ate_execution_active_work_allows_stop
+run_case "stop gate kimi open call age bounds stop" \
+  test_stop_gate_kimi_open_call_age_bounds_stop
+run_case "stop gate kimi subagent stop never exempted" \
+  test_stop_gate_kimi_subagent_stop_never_exempted
 run_case "ECI gate allows spawned-agent transcript payload" \
   test_eci_gate_allows_spawned_agent_transcript_payload
 run_case "ECI gate blocks main transcript payload" \

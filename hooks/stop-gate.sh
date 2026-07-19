@@ -107,7 +107,12 @@ block_if_eci_active_for_stop() {
     [ -f "$root/kimi-wire-warnings-$session_id.jsonl" ]; then
     warn_note=" Recorded kimi-wire security warnings: $root/kimi-wire-warnings-$session_id.jsonl."
   fi
-  json_block "ECI is active for this stop attempt via marker $marker. Never stop until the ECI task is complete. Continue the ECI task, update the session project-understanding ledger, or use blocker-resolution-protocol before reporting a blocker requiring user input while ECI remains active. Disengage only with clean-pass or user-closed via ~/.kimi-code/bin/eci-active off <disengage-report.md>.$warn_note"
+  if ! codex_hook_is_subagent_context "$input" &&
+    codex_hook_kimi_session_has_active_work "$input"; then
+    json_continue
+    return 0
+  fi
+  json_block "ECI is active for this session via marker $marker and no subagent or background task is working. Continue the mission, dispatch remaining work to Agent/background tasks (their completion notifications resume this session — ending the turn is then allowed), or disengage via clean-pass/user-closed with ~/.kimi-code/bin/eci-active off <disengage-report.md>.$warn_note"
   return 0
 }
 
@@ -578,7 +583,11 @@ if [ -n "$ate_active" ] && [ -f "$ate_active" ]; then
     awaiting_user|closed) ;;
     *)
       codex_note_state_session_id "$ate_active" "$session_id" || true
-      json_block "ATE is active for this session. Continue the agent team task, update the session project-understanding ledger, use blocker-resolution-protocol before reporting a real blocker, or close ATE before stopping."
+      if codex_hook_kimi_session_has_active_work "$input"; then
+        json_continue
+        exit 0
+      fi
+      json_block "ATE is active for this session and no subagent or background task is working. Continue the agent team task, dispatch remaining work to teammates/background tasks (completion notifications resume this session), use blocker-resolution-protocol before reporting a real blocker, or update the phase with update_ate_marker awaiting_user/closed before stopping."
       exit 0
       ;;
   esac

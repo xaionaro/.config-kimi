@@ -572,6 +572,73 @@ codex_hook_is_subagent_context_kimi() {
   ' "$wire"
 }
 
+# Active-work exemption for Stop: returns 0 when the session's main wire or
+# task state shows delegated work still live — an open Agent/AgentSwarm
+# tool.call of any age up to 6 h (a foreground subagent holds its call open
+# for its whole run; main cannot reach Stop while blocked inside it, so an
+# open record at Stop time means the turn ended around an active subagent),
+# or a background task whose tasks/<id>.json still says "running" before its
+# startedAt+timeoutMs deadline. Any signal failure returns 1 (no active
+# work), keeping deny-gates fail-closed.
+codex_hook_kimi_session_has_active_work() {
+  local input="${1:-}" sid session_dir wire now_ms
+  local task_json status started timeout deadline
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
+  [ -n "$sid" ] || return 1
+  session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+
+  # Background half: detached tasks (agents and bash) via tasks/*.json.
+  for task_json in "$session_dir"/agents/main/tasks/*.json; do
+    [ -f "$task_json" ] || continue
+    status=$(jq -r '.status // empty' "$task_json" 2>/dev/null) || continue
+    [ "$status" = "running" ] || continue
+    started=$(jq -r '.startedAt // 0' "$task_json" 2>/dev/null || printf '0')
+    timeout=$(jq -r '.timeoutMs // 0' "$task_json" 2>/dev/null || printf '0')
+    case "$started$timeout" in *[!0-9]*|"") continue ;; esac
+    [ "$started" -gt 0 ] 2>/dev/null || continue
+    if [ "$timeout" -gt 0 ] 2>/dev/null; then
+      deadline=$(( started + timeout + 300000 ))
+    else
+      deadline=$(( started + 10800000 ))
+    fi
+    [ "$now_ms" -lt "$deadline" ] && return 0
+  done
+
+  # Foreground half: open Agent/AgentSwarm call, age in [0, 6 h] (no floor —
+  # Stop is not a batched sibling hook, so the 3000 ms classification floor
+  # does not apply here).
+  wire="$session_dir/agents/main/wire.jsonl"
+  [ -f "$wire" ] || return 1
+  head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"' || return 1
+  awk -v now="$now_ms" '
+    index($0, "\"event\":{\"type\":\"tool.call\"") &&
+      (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
+      id = ""; t = ""
+      if (match($0, /"toolCallId":"[^"]+"/))
+        id = substr($0, RSTART + 14, RLENGTH - 15)
+      if (match($0, /"time":[0-9]+}[[:space:]]*$/))
+        t = substr($0, RSTART + 7, RLENGTH - 8)
+      if (id != "") open[id] = t
+      next
+    }
+    index($0, "\"event\":{\"type\":\"tool.result\"") {
+      if (match($0, /"toolCallId":"[^"]+"/))
+        delete open[substr($0, RSTART + 14, RLENGTH - 15)]
+      next
+    }
+    END {
+      found = 0
+      for (id in open) {
+        if (open[id] == "") continue
+        age = now - open[id]
+        if (age >= 0 && age <= 21600000) { found = 1; break }
+      }
+      exit(found ? 0 : 1)
+    }
+  ' "$wire"
+}
+
 codex_hook_transcript_first_record_is_admissible() {
   local input="${1:-}"
 
