@@ -19,7 +19,10 @@ fi
 FORMAL_AVAILABLE=0
 if [ -d "$ROOT/.git" ] &&
     [ -f "$ROOT/proofs/Spec/PreReviewerController.lean" ] &&
-    git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "$ROOT" rev-parse --verify HEAD >/dev/null 2>&1 &&
+    git -C "$ROOT" cat-file -e 72b8b3d62df89975b35ed5bda1a5231a2be4fe4b 2>/dev/null &&
+    git -C "$ROOT" cat-file -e dbb4a8b9a46f76fb9d0b644942d56fa45d3fce29 2>/dev/null &&
+    git -C "$ROOT" cat-file -e b970b2d106847dc615e6132cd8e0f801a7d8db66 2>/dev/null; then
   FORMAL_AVAILABLE=1
 fi
 

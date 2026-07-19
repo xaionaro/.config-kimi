@@ -107,12 +107,15 @@ block_if_eci_active_for_stop() {
     [ -f "$root/kimi-wire-warnings-$session_id.jsonl" ]; then
     warn_note=" Recorded kimi-wire security warnings: $root/kimi-wire-warnings-$session_id.jsonl."
   fi
-  if ! codex_hook_is_subagent_context "$input" &&
-    codex_hook_kimi_session_has_active_work "$input"; then
-    json_continue
-    return 0
+  local work_claim=""
+  if ! codex_hook_is_subagent_context "$input"; then
+    if codex_hook_kimi_session_has_active_work "$input"; then
+      json_continue
+      return 0
+    fi
+    work_claim=" and no subagent or background task is working"
   fi
-  json_block "ECI is active for this session via marker $marker and no subagent or background task is working. Continue the mission, dispatch remaining work to Agent/background tasks (their completion notifications resume this session — ending the turn is then allowed), or disengage via clean-pass/user-closed with ~/.kimi-code/bin/eci-active off <disengage-report.md>.$warn_note"
+  json_block "ECI is active for this session via marker $marker$work_claim. Continue the mission, dispatch remaining work to Agent/background tasks (their completion notifications resume this session — ending the turn is then allowed), or disengage via clean-pass/user-closed with ~/.kimi-code/bin/eci-active off <disengage-report.md>.$warn_note"
   return 0
 }
 

@@ -12,6 +12,9 @@ codex_valid_session_id() {
   esac
 }
 
+# Reserved proof-root entries: bare names are fixed state directories;
+# *-suffixed globs are per-session file families that must never be read
+# as session directories.
 codex_reserved_proof_dir() {
   case "${1:-}" in
     activity|audit|eci|history|pre-reviewer|reviewer|reviewer-dumps|security-warnings-*|kimi-wire-warnings-*|side-stop|skip-stop|skills)
@@ -487,13 +490,13 @@ codex_hook_is_subagent_context() {
 #    completed 20409 ms; ttftMs min 2856 ms makes a sub-3 s Stop
 #    implausible; the only sub-2 s call→result is an instant
 #    "already running and cannot run concurrently" spawn error with no
-#    agent loop, hence no Stop hook). If one ever occurs: under the
-#    session's own eci_active marker stop-gate blocks subagent stops by
-#    design at any age (active_eci_marker_for_stop returns the own marker
-#    before the subagent exemption), so the misclassification changes
-#    nothing; under legacy/side-parent markers it costs one block that
-#    self-corrects on the next stop once the spawn age crosses 3000 ms.
-#    No spin-to-timeout and no deny-forever path arises from the floor.
+#    agent loop, hence no Stop hook). If one ever occurs it classifies as
+#    main in this window, and the Stop gate's active-work exemption
+#    (codex_hook_kimi_session_has_active_work: open call age <6 h, no
+#    floor) then continues the stop under own and legacy markers alike
+#    instead of blocking it; genuine subagent stops are unaffected
+#    because the subagent branch never consults the exemption. No
+#    spin-to-timeout and no deny-forever path arises from the floor.
 # Background agents close their call record at spawn ("status: running"
 # result), so their edits classify as main (denied under a marker): a
 # documented fail-closed limitation; ECI/ATE under a marker must use
@@ -504,6 +507,12 @@ codex_hook_is_subagent_context() {
 # self-corrects when that call's own tool.result lands. A main edit
 # batched behind such a call is exempted only if cumulative hook latency
 # pushes its hook past the 3000 ms floor; no such wire observed.
+# Millisecond bounds for the open-call/task age scans below.
+KIMI_WIRE_OPEN_CALL_FLOOR_MS=3000
+KIMI_WIRE_OPEN_CALL_CEILING_MS=21600000
+KIMI_TASK_DEFAULT_TIMEOUT_MS=10800000
+KIMI_TASK_DEADLINE_GRACE_MS=300000
+
 codex_hook_kimi_session_dir() {
   local sid="$1" root="$HOME/.kimi-code/sessions" d
   codex_valid_session_id "$sid" || return 1
@@ -527,24 +536,13 @@ codex_kimi_wire_security_warning() {
     "$kind" "$sid" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$file" 2>/dev/null || true
 }
 
-codex_hook_is_subagent_context_kimi() {
-  local input="${1:-}" sid session_dir wire now_ms
-
-  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
-  [ -n "$sid" ] || return 1
-  session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
-  wire="$session_dir/agents/main/wire.jsonl"
-  [ -f "$wire" ] || return 1
-
-  # Format canary: unknown wire protocol → fail closed + warn once per kind.
-  if ! head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"'; then
-    codex_kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
-    return 1
-  fi
-
-  now_ms=$(( $(date +%s%N) / 1000000 ))
+# Shared open-Agent/AgentSwarm-call scan: returns 0 when the wire holds an
+# open tool.call (no tool.result) whose record age is in [floor_ms,
+# KIMI_WIRE_OPEN_CALL_CEILING_MS]; anything unparseable yields no match.
+kimi_wire_open_call_age() {
+  local wire="$1" floor_ms="$2" now_ms="$3"
   # substr offsets: len('"toolCallId":"')=14 (+1 closing quote=15); len('"time":')=7 (+1 trailing brace=8).
-  awk -v now="$now_ms" '
+  awk -v now="$now_ms" -v floor="$floor_ms" -v ceil="$KIMI_WIRE_OPEN_CALL_CEILING_MS" '
     index($0, "\"event\":{\"type\":\"tool.call\"") &&
       (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
       id = ""; t = ""
@@ -565,11 +563,30 @@ codex_hook_is_subagent_context_kimi() {
       for (id in open) {
         if (open[id] == "") continue          # no record time → fail closed
         age = now - open[id]
-        if (age >= 3000 && age <= 21600000) { found = 1; break }
+        if (age >= floor && age <= ceil) { found = 1; break }
       }
       exit(found ? 0 : 1)
     }
   ' "$wire"
+}
+
+codex_hook_is_subagent_context_kimi() {
+  local input="${1:-}" sid session_dir wire now_ms
+
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null) || return 1
+  [ -n "$sid" ] || return 1
+  session_dir=$(codex_hook_kimi_session_dir "$sid") || return 1
+  wire="$session_dir/agents/main/wire.jsonl"
+  [ -f "$wire" ] || return 1
+
+  # Format canary: unknown wire protocol → fail closed + warn once per kind.
+  if ! head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"'; then
+    codex_kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
+    return 1
+  fi
+
+  now_ms=$(( $(date +%s%N) / 1000000 ))
+  kimi_wire_open_call_age "$wire" "$KIMI_WIRE_OPEN_CALL_FLOOR_MS" "$now_ms"
 }
 
 # Active-work exemption for Stop: returns 0 when the session's main wire or
@@ -578,8 +595,13 @@ codex_hook_is_subagent_context_kimi() {
 # for its whole run; main cannot reach Stop while blocked inside it, so an
 # open record at Stop time means the turn ended around an active subagent),
 # or a background task whose tasks/<id>.json still says "running" before its
-# startedAt+timeoutMs deadline. Any signal failure returns 1 (no active
-# work), keeping deny-gates fail-closed.
+# startedAt+timeoutMs deadline plus KIMI_TASK_DEADLINE_GRACE_MS (300 s) of
+# grace, or startedAt+KIMI_TASK_DEFAULT_TIMEOUT_MS (3 h) when the task
+# declares no timeout. The ECI Stop gate reaches this helper only in main
+# context, where the classification floor bounds the effective window to
+# [0, 3000 ms): a main stop that fresh with an open call is the designed
+# turn-ends-around-a-live-agent case. Any signal failure returns 1 (no
+# active work), keeping deny-gates fail-closed.
 codex_hook_kimi_session_has_active_work() {
   local input="${1:-}" sid session_dir wire now_ms
   local task_json status started timeout deadline
@@ -598,45 +620,20 @@ codex_hook_kimi_session_has_active_work() {
     case "$started$timeout" in *[!0-9]*|"") continue ;; esac
     [ "$started" -gt 0 ] 2>/dev/null || continue
     if [ "$timeout" -gt 0 ] 2>/dev/null; then
-      deadline=$(( started + timeout + 300000 ))
+      deadline=$(( started + timeout + KIMI_TASK_DEADLINE_GRACE_MS ))
     else
-      deadline=$(( started + 10800000 ))
+      deadline=$(( started + KIMI_TASK_DEFAULT_TIMEOUT_MS ))
     fi
     [ "$now_ms" -lt "$deadline" ] && return 0
   done
 
-  # Foreground half: open Agent/AgentSwarm call, age in [0, 6 h] (no floor —
+  # Foreground half: open Agent/AgentSwarm call, age in [0, 6 h] (floor 0 —
   # Stop is not a batched sibling hook, so the 3000 ms classification floor
   # does not apply here).
   wire="$session_dir/agents/main/wire.jsonl"
   [ -f "$wire" ] || return 1
   head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"' || return 1
-  awk -v now="$now_ms" '
-    index($0, "\"event\":{\"type\":\"tool.call\"") &&
-      (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
-      id = ""; t = ""
-      if (match($0, /"toolCallId":"[^"]+"/))
-        id = substr($0, RSTART + 14, RLENGTH - 15)
-      if (match($0, /"time":[0-9]+}[[:space:]]*$/))
-        t = substr($0, RSTART + 7, RLENGTH - 8)
-      if (id != "") open[id] = t
-      next
-    }
-    index($0, "\"event\":{\"type\":\"tool.result\"") {
-      if (match($0, /"toolCallId":"[^"]+"/))
-        delete open[substr($0, RSTART + 14, RLENGTH - 15)]
-      next
-    }
-    END {
-      found = 0
-      for (id in open) {
-        if (open[id] == "") continue
-        age = now - open[id]
-        if (age >= 0 && age <= 21600000) { found = 1; break }
-      }
-      exit(found ? 0 : 1)
-    }
-  ' "$wire"
+  kimi_wire_open_call_age "$wire" 0 "$now_ms"
 }
 
 codex_hook_transcript_first_record_is_admissible() {
