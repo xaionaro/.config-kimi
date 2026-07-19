@@ -18,7 +18,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLER = ROOT / "hooks" / "lib" / "edit_bash_pre_reviewer_controller.py"
 WRAPPER = ROOT / "hooks" / "edit-bash-pre-reviewer.sh"
-HOOKS_CONFIG = ROOT / "config.toml"
+HOOKS_CONFIG = ROOT / "config.example.toml"
 REVIEWER_CALL = ROOT / "hooks/lib/reviewer-call.sh"
 BACKEND_TIMEOUT_MAX_SECONDS = 58
 CONTROLLER_TIMEOUT_SECONDS = 70

@@ -17,7 +17,7 @@ PRUNER="$ROOT/hooks/lib/prune_pre_reviewer_turn_state.py"
 REVIEWER_CALL="$ROOT/hooks/lib/reviewer-call.sh"
 PROFILER="$ROOT/hooks/tests/profile_pre_reviewer_ab.py"
 WATCHDOG="$ROOT/hooks/tests/process-watchdog.py"
-HOOK_CONFIG="$ROOT/config.toml"
+HOOK_CONFIG="$ROOT/config.example.toml"
 
 resolve_tool() {
   local tool="$1" resolved

@@ -34,7 +34,162 @@ def git_output(*arguments: str) -> bytes:
     ).stdout
 
 
+def write_configuration(root: Path, relative: Path, label: str) -> None:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "[[hooks]]\n"
+        'event = "PreToolUse"\n'
+        'matcher = "^Bash$"\n'
+        f'command = "/{label}/validator"\n\n'
+        "[[hooks]]\n"
+        'event = "PreToolUse"\n'
+        'matcher = "^Bash$"\n'
+        f'command = "/{label}/reviewer"\n\n'
+        "[[hooks]]\n"
+        'event = "UserPromptSubmit"\n'
+        f'command = "/{label}/prompt"\n',
+        encoding="utf-8",
+    )
+
+
+def write_runtime_identity_sources(root: Path) -> None:
+    manifest = root / MODULE.RUNTIME_MANIFEST_RELATIVE_PATH
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+    for relative in MODULE.CANDIDATE_RUNTIME_SOURCE_PATHS[1:]:
+        source = root / relative
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("generated runtime source\n", encoding="utf-8")
+
+
 class ProfileIdentityTests(unittest.TestCase):
+    def test_configuration_source_contract_is_exposed(self) -> None:
+        self.assertTrue(
+            callable(getattr(MODULE, "resolve_configuration_source", None)),
+            "candidate-first configuration resolver is missing",
+        )
+        self.assertEqual(
+            getattr(MODULE, "CANDIDATE_CONFIGURATION_RELATIVE_PATH", None),
+            Path("config.example.toml"),
+        )
+        self.assertEqual(
+            getattr(MODULE, "HISTORICAL_CONFIGURATION_RELATIVE_PATH", None),
+            Path("config.toml"),
+        )
+
+    def test_candidate_only_configuration_is_selected(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="profile-candidate-config-"
+        ) as temporary:
+            root = Path(temporary)
+            write_configuration(
+                root,
+                MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH,
+                "candidate",
+            )
+            write_runtime_identity_sources(root)
+
+            self.assertEqual(
+                MODULE.resolve_configuration_source(root),
+                MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH,
+            )
+            self.assertEqual(
+                MODULE.configured_commands(root),
+                (
+                    "/candidate/validator",
+                    "/candidate/reviewer",
+                    "/candidate/prompt",
+                ),
+            )
+            discovered = set(MODULE.discover_runtime_sources(root))
+            self.assertIn(MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH, discovered)
+            self.assertNotIn(MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH, discovered)
+            self.assertEqual(
+                MODULE._runtime_manifest(root)[1][0],
+                MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH.as_posix(),
+            )
+
+    def test_historical_only_configuration_is_selected(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="profile-historical-config-"
+        ) as temporary:
+            root = Path(temporary)
+            write_configuration(
+                root,
+                MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH,
+                "historical",
+            )
+            write_runtime_identity_sources(root)
+
+            self.assertEqual(
+                MODULE.resolve_configuration_source(root),
+                MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH,
+            )
+            self.assertEqual(
+                MODULE.configured_commands(root),
+                (
+                    "/historical/validator",
+                    "/historical/reviewer",
+                    "/historical/prompt",
+                ),
+            )
+            discovered = set(MODULE.discover_runtime_sources(root))
+            self.assertIn(MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH, discovered)
+            self.assertNotIn(MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH, discovered)
+            self.assertEqual(
+                MODULE._runtime_manifest(root)[1][0],
+                MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH.as_posix(),
+            )
+
+    def test_candidate_configuration_wins_when_both_exist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="profile-both-configs-") as temporary:
+            root = Path(temporary)
+            write_configuration(
+                root,
+                MODULE.HISTORICAL_CONFIGURATION_RELATIVE_PATH,
+                "historical",
+            )
+            write_configuration(
+                root,
+                MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH,
+                "candidate",
+            )
+
+            self.assertEqual(
+                MODULE.resolve_configuration_source(root),
+                MODULE.CANDIDATE_CONFIGURATION_RELATIVE_PATH,
+            )
+            self.assertEqual(
+                MODULE.configured_commands(root)[0],
+                "/candidate/validator",
+            )
+
+    def test_missing_candidate_and_historical_configuration_errors(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="profile-no-config-") as temporary:
+            root = Path(temporary)
+
+            with self.assertRaisesRegex(
+                MODULE.ProfileError,
+                "configuration source is absent",
+            ):
+                MODULE.resolve_configuration_source(root)
+            with self.assertRaisesRegex(
+                MODULE.ProfileError,
+                "configuration source is absent",
+            ):
+                MODULE.configured_commands(root)
+            with self.assertRaisesRegex(
+                MODULE.ProfileError,
+                "configuration source is absent",
+            ):
+                MODULE.discover_runtime_sources(root)
+            with self.assertRaisesRegex(
+                MODULE.ProfileError,
+                "configuration source is absent",
+            ):
+                MODULE._runtime_manifest(root)
+
     def test_runtime_manifest_covers_configuration_and_transitive_sources(self) -> None:
         definition = MODULE.load_runtime_manifest(ROOT)
         expected = {Path(value) for value in definition["product_sources"]}

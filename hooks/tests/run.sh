@@ -258,10 +258,10 @@ json_field_not_contains() {
   ! json_field_contains "$@"
 }
 
-# Render config.toml [[hooks]] entries as the nested event/matcher JSON
+# Render config.example.toml [[hooks]] entries as the nested event/matcher JSON
 # shape the wiring assertions below were written against.
 hooks_config_json() {
-  python3 - "$ROOT/config.toml" <<'PY'
+  python3 - "$ROOT/config.example.toml" <<'PY'
 import json
 import sys
 import tomllib
@@ -281,6 +281,147 @@ for entry in config.get("hooks", []):
         grouped[event].append({"matcher": matcher, "hooks": [body]})
 json.dump({"hooks": grouped}, sys.stdout)
 PY
+}
+
+test_config_example_schema_is_hook_only() {
+  python3 - "$ROOT/config.example.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    configuration = tomllib.load(handle)
+if set(configuration) != {"hooks"}:
+    raise SystemExit(1)
+allowed = {"event", "matcher", "command", "timeout"}
+hooks = configuration["hooks"]
+if not isinstance(hooks, list) or not hooks:
+    raise SystemExit(1)
+if any(not isinstance(entry, dict) or not set(entry) <= allowed for entry in hooks):
+    raise SystemExit(1)
+PY
+}
+
+bootstrap_config() {
+  KIMI_CODE_HOME="$1" HOME="$BOOTSTRAP_TMP_ROOT/bootstrap-home" \
+    "$ROOT/bin/bootstrap-config"
+}
+
+BOOTSTRAP_TMP_ROOT="$(cd -P -- "$TMP_ROOT" && pwd)"
+
+test_bootstrap_config_creates_once_with_private_modes() {
+  local data_root="$BOOTSTRAP_TMP_ROOT/bootstrap-create"
+  mkdir -m 0755 "$data_root" || return 1
+
+  bootstrap_config "$data_root" || return 1
+
+  [ "$(stat -c %a "$data_root")" = 700 ] &&
+    [ "$(stat -c %a "$data_root/config.toml")" = 600 ] &&
+    cmp -s "$ROOT/config.example.toml" "$data_root/config.toml"
+}
+
+test_bootstrap_config_accepts_symlinked_parent_aliases() {
+  local physical_parent="$BOOTSTRAP_TMP_ROOT/bootstrap-alias-physical"
+  local logical_parent="$BOOTSTRAP_TMP_ROOT/bootstrap-alias-logical"
+  local variant suffix physical_root logical_root
+  mkdir -m 0755 -p "$physical_parent" || return 1
+  ln -s "$physical_parent" "$logical_parent" || return 1
+
+  for variant in plain slash dot; do
+    case "$variant" in
+      plain) suffix= ;;
+      slash) suffix=/ ;;
+      dot) suffix=/. ;;
+    esac
+    physical_root="$physical_parent/data-$variant"
+    logical_root="$logical_parent/data-$variant"
+    mkdir -m 0755 "$physical_root" || return 1
+
+    [ ! -L "$logical_root" ] &&
+      [ "$(cd -P -- "$logical_root" && pwd)" != "$logical_root" ] || return 1
+    bootstrap_config "$logical_root$suffix" || return 1
+
+    [ "$(stat -c %a "$physical_root")" = 700 ] &&
+      [ "$(stat -c %a "$physical_root/config.toml")" = 600 ] &&
+      cmp -s "$ROOT/config.example.toml" "$physical_root/config.toml" || return 1
+  done
+}
+
+test_bootstrap_config_preserves_existing_regular_file() {
+  local data_root="$BOOTSTRAP_TMP_ROOT/bootstrap-repeat"
+  local expected="$BOOTSTRAP_TMP_ROOT/bootstrap-repeat.expected"
+  mkdir -m 0755 "$data_root" || return 1
+  printf '%s\n' 'local configuration stays local' >"$data_root/config.toml"
+  cp "$data_root/config.toml" "$expected" || return 1
+  chmod 0644 "$data_root/config.toml" || return 1
+
+  bootstrap_config "$data_root" || return 1
+  bootstrap_config "$data_root" || return 1
+
+  cmp -s "$expected" "$data_root/config.toml" &&
+    [ "$(stat -c %a "$data_root")" = 700 ] &&
+    [ "$(stat -c %a "$data_root/config.toml")" = 600 ]
+}
+
+test_bootstrap_config_rejects_symlink_root() {
+  local real_root="$BOOTSTRAP_TMP_ROOT/bootstrap-real-root"
+  local linked_root="$BOOTSTRAP_TMP_ROOT/bootstrap-linked-root"
+  local suffix
+  mkdir "$real_root" || return 1
+  ln -s "$real_root" "$linked_root" || return 1
+
+  for suffix in '' / /. /./; do
+    ! bootstrap_config "$linked_root$suffix" || return 1
+    [ ! -e "$real_root/config.toml" ] || return 1
+  done
+}
+
+test_bootstrap_config_rejects_symlink_and_nonregular_targets() {
+  local data_root="$BOOTSTRAP_TMP_ROOT/bootstrap-targets"
+  local outside="$BOOTSTRAP_TMP_ROOT/bootstrap-outside"
+  mkdir "$data_root" || return 1
+  printf '%s\n' 'outside bytes' >"$outside"
+  ln -s "$outside" "$data_root/config.toml" || return 1
+  ! bootstrap_config "$data_root" || return 1
+  [ "$(cat "$outside")" = 'outside bytes' ] || return 1
+  rm "$data_root/config.toml" || return 1
+  mkdir "$data_root/config.toml" || return 1
+
+  ! bootstrap_config "$data_root"
+}
+
+test_bootstrap_config_rejects_unsafe_roots() {
+  local missing="$BOOTSTRAP_TMP_ROOT/bootstrap-missing"
+  local dotdot_parent="$BOOTSTRAP_TMP_ROOT/bootstrap-dotdot-parent"
+  local dotdot_child="$dotdot_parent/child"
+  local parent_mode
+  mkdir -m 0755 -p "$dotdot_child" || return 1
+  parent_mode="$(stat -c %a "$dotdot_parent")" || return 1
+
+  ! bootstrap_config relative-root &&
+    ! bootstrap_config / &&
+    ! bootstrap_config "$missing" &&
+    ! bootstrap_config "$dotdot_child/.." &&
+    [ ! -e "$dotdot_parent/config.toml" ] &&
+    [ "$(stat -c %a "$dotdot_parent")" = "$parent_mode" ]
+}
+
+test_bootstrap_config_concurrent_create_is_atomic() {
+  local data_root="$BOOTSTRAP_TMP_ROOT/bootstrap-concurrent"
+  local status=0
+  local -a workers=()
+  mkdir "$data_root" || return 1
+
+  for _index in 1 2 3 4 5 6 7 8; do
+    bootstrap_config "$data_root" &
+    workers+=("$!")
+  done
+  for worker in "${workers[@]}"; do
+    wait "$worker" || status=1
+  done
+
+  [ "$status" -eq 0 ] &&
+    cmp -s "$ROOT/config.example.toml" "$data_root/config.toml" &&
+    [ "$(find "$data_root" -maxdepth 1 -name '.config.toml.tmp.*' | wc -l)" -eq 0 ]
 }
 
 run_hook() {
@@ -7519,6 +7660,22 @@ test_go_skill_gate_hook_pattern_in_sync() {
 }
 
 
+run_case "tracked config example is hook-only" \
+  test_config_example_schema_is_hook_only
+run_case "config bootstrap creates once with private modes" \
+  test_bootstrap_config_creates_once_with_private_modes
+run_case "config bootstrap accepts symlinked parent aliases" \
+  test_bootstrap_config_accepts_symlinked_parent_aliases
+run_case "config bootstrap preserves existing regular file bytes" \
+  test_bootstrap_config_preserves_existing_regular_file
+run_case "config bootstrap rejects symlink root" \
+  test_bootstrap_config_rejects_symlink_root
+run_case "config bootstrap rejects symlink and nonregular targets" \
+  test_bootstrap_config_rejects_symlink_and_nonregular_targets
+run_case "config bootstrap rejects unsafe roots" \
+  test_bootstrap_config_rejects_unsafe_roots
+run_case "config bootstrap concurrent create is atomic" \
+  test_bootstrap_config_concurrent_create_is_atomic
 run_case "prompt state is silent and records HEAD" \
   test_prompt_state_is_silent_records_head_and_clears_bypass
 run_case "prompt state marks /side prompts" \

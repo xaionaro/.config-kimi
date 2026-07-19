@@ -5,8 +5,9 @@ ported, what is verified, and what remains as known limitation.
 
 ## Hook wiring
 
-- All hooks are wired via `config.toml` `[[hooks]]` entries (Kimi Code
-  native): 10 entries covering 9 distinct scripts — session-snapshot.sh
+- Versioned hook-wiring evidence lives in the hook-only
+  `config.example.toml` `[[hooks]]` entries (Kimi Code native): 10 entries
+  covering 9 distinct scripts — session-snapshot.sh
   (SessionStart), prompt-task-reminder.sh (UserPromptSubmit),
   validate-bash.sh and edit-bash-pre-reviewer.sh (PreToolUse Bash),
   validate-edit-write.sh, security-reminder.py, eci-active-gate.sh,
@@ -14,8 +15,10 @@ ported, what is verified, and what remains as known limitation.
   (PreToolUse Edit/Write), stop-gate.sh (Stop). The legacy JSON hook
   manifest (`hooks.json`) was removed in the codex-legacy purge; tests
   assert the TOML wiring via the converted `hooks_config_json` view in
-  `hooks/tests/run.sh`. `hooks/system-prompt-reviewer.sh` is not wired
-  as a hook; stop-gate.sh invokes it internally.
+  `hooks/tests/run.sh`. `bin/bootstrap-config` can create the ignored live
+  `config.toml` without replacing an existing regular file and enforces
+  data-root/config modes `700`/`600`. `hooks/system-prompt-reviewer.sh` is
+  not wired as a hook; stop-gate.sh invokes it internally.
 
 ## Naming policy
 
@@ -70,9 +73,9 @@ Status: FIXED.
   the worker and its transcript-based tests remain for the codex-format
   fixtures.
 - `hooks/go-skill-gate.sh` is implemented and unit-tested but
-  intentionally not wired in `config.toml` (it only ever appeared in the
-  legacy, never-read `hooks.json`). Enabling a `.go` deny-gate is a
-  behavior change not yet approved.
+  intentionally absent from the versioned `config.example.toml` wiring
+  (it only ever appeared in the legacy, never-read `hooks.json`). Enabling
+  a `.go` deny-gate is a behavior change not yet approved.
 - The stop reviewer (`hooks/system-prompt-reviewer.sh`, invoked by
   stop-gate.sh, not wired as a hook) runs transcript-blind on kimi:
   kimi Stop payloads carry no `transcript_path`, and kimi session dirs
@@ -95,7 +98,7 @@ Status: FIXED.
 - Alias/rollout shapes: `kimi_proof_alias_session_id`,
   `kimi_real_session_dir_name`, the alias branch and rollout case-arm of
   `kimi_path_owner_session_id` (default-root fallback retained).
-- Legacy hook manifest: `hooks.json` (wiring lives in `config.toml`;
-  all consumers repointed, jq-on-JSON assertions replaced by
-  tomllib-on-TOML or the converted view).
+- Legacy hook manifest: `hooks.json` (versioned wiring evidence lives in
+  `config.example.toml`, while the installed `config.toml` stays ignored;
+  all consumers use tomllib-on-TOML or the converted view).
 - Stale backup: `hooks/lib/codex-proof-state.sh.bak-20260718`.

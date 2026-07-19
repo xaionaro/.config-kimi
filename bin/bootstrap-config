@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  printf '%s\n' "bootstrap-config: $1" >&2
+  exit 1
+}
+
+if [ -n "${KIMI_CODE_HOME:-}" ]; then
+  data_root="$KIMI_CODE_HOME"
+elif [ -n "${HOME:-}" ]; then
+  data_root="$HOME/.kimi-code"
+else
+  fail "KIMI_CODE_HOME or HOME is required"
+fi
+
+case "$data_root" in
+  /*) ;;
+  *) fail "data root must be absolute" ;;
+esac
+while :; do
+  case "$data_root" in
+    /|/.) data_root=/; break ;;
+    */.) data_root="${data_root%/.}" ;;
+    */) data_root="${data_root%/}" ;;
+    *) break ;;
+  esac
+done
+[ "$data_root" != / ] || fail "filesystem root is not a data root"
+root_parent="$(dirname -- "$data_root")" || fail "cannot split data root"
+root_name="$(basename -- "$data_root")" || fail "cannot split data root"
+case "$root_name" in
+  .|..) fail "data root must not end in . or .." ;;
+esac
+physical_parent="$(cd -P -- "$root_parent" && pwd)" ||
+  fail "data root parent is inaccessible"
+case "$physical_parent" in
+  /) physical_root="/$root_name" ;;
+  *) physical_root="$physical_parent/$root_name" ;;
+esac
+[ "$physical_root" != / ] || fail "filesystem root is not a data root"
+[ ! -L "$physical_root" ] || fail "data root must not be a symlink"
+[ -d "$physical_root" ] || fail "data root must be an existing directory"
+root_owner="$(stat -c %u -- "$physical_root")" || fail "cannot inspect data root"
+[ "$root_owner" = "$(id -u)" ] ||
+  fail "data root must be owned by the current user"
+
+script_dir="$(cd -P -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)" ||
+  fail "script directory is inaccessible"
+template="$script_dir/../config.example.toml"
+[ -f "$template" ] && [ ! -L "$template" ] ||
+  fail "config example is missing or unsafe"
+
+chmod 0700 -- "$physical_root" || fail "cannot protect data root"
+[ ! -L "$physical_root" ] && [ -d "$physical_root" ] ||
+  fail "data root changed during validation"
+root_mode="$(stat -c %a -- "$physical_root")" || fail "cannot inspect data root mode"
+[ "$root_mode" = 700 ] ||
+  fail "data root mode is not private"
+
+target="$physical_root/config.toml"
+
+protect_existing_target() {
+  [ ! -L "$target" ] || return 1
+  [ -f "$target" ] || return 1
+  [ "$(stat -c %u -- "$target")" = "$(id -u)" ] || return 1
+  chmod 0600 -- "$target" || return 1
+  [ ! -L "$target" ] && [ -f "$target" ] &&
+    [ "$(stat -c %a -- "$target")" = 600 ]
+}
+
+if [ -L "$target" ]; then
+  fail "config target must not be a symlink"
+fi
+if [ -e "$target" ]; then
+  protect_existing_target || fail "config target must be a safe regular file"
+  exit 0
+fi
+
+temporary=""
+cleanup() {
+  if [ -n "$temporary" ] && [ -f "$temporary" ] && [ ! -L "$temporary" ]; then
+    rm -f -- "$temporary"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+temporary="$(mktemp "$physical_root/.config.toml.tmp.XXXXXX")" ||
+  fail "cannot prepare config temporary file"
+cp -- "$template" "$temporary" || fail "cannot prepare config bytes"
+chmod 0600 -- "$temporary" || fail "cannot protect config temporary file"
+
+if ln -T -- "$temporary" "$target" 2>/dev/null; then
+  rm -- "$temporary"
+  temporary=""
+elif ! protect_existing_target; then
+  fail "config target appeared in an unsafe form"
+fi
+
+protect_existing_target || fail "published config is not a safe regular file"

@@ -12,7 +12,7 @@
     {
       "area": "hook-wiring",
       "status": "ported",
-      "evidence": "config.toml [[hooks]]; legacy hooks.json removed"
+      "evidence": "config.example.toml [[hooks]]; bin/bootstrap-config creates ignored live config.toml; legacy hooks.json removed"
     },
     {
       "area": "subagent-hook-exemptions",

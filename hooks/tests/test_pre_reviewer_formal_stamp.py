@@ -27,7 +27,7 @@ DIFFERENTIAL_SOURCES = (
     Path("hooks/lib/pre-reviewer-turn-state.sh"),
     Path("hooks/lib/prune_pre_reviewer_turn_state.py"),
     Path("hooks/lib/reviewer-call.sh"),
-    Path("config.toml"),
+    Path("config.example.toml"),
     Path("hooks/tests/pre_reviewer_lifecycle.py"),
     Path("hooks/tests/differential/pre-reviewer-controller.sh"),
 )
@@ -465,7 +465,7 @@ class FormalStampTests(unittest.TestCase):
                 "CONTROLLER_TIMEOUT_SECONDS: Final = 70.0",
                 "CONTROLLER_TIMEOUT_SECONDS: Final = 69.0",
             ),
-            (Path("config.toml"), "timeout = 75", "timeout = 74"),
+            (Path("config.example.toml"), "timeout = 75", "timeout = 74"),
             (
                 Path("hooks/lib/pre-reviewer-turn-state.sh"),
                 '[ -z "${KIMI_TURN_LOCK_FD:-}" ] || return 1',

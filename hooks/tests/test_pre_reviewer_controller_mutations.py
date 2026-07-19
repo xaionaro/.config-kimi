@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = Path("hooks/edit-bash-pre-reviewer.sh")
 CONTROLLER = Path("hooks/lib/edit_bash_pre_reviewer_controller.py")
-HOOKS_CONFIG = Path("config.toml")
+HOOKS_CONFIG = Path("config.example.toml")
 SPEC = Path("proofs/Spec/PreReviewerController.lean")
 PROOFS = Path("proofs/Proofs/PreReviewerController.lean")
 LIFECYCLE = Path("hooks/tests/pre_reviewer_lifecycle.py")

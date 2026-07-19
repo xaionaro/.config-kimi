@@ -773,6 +773,8 @@ _SOURCE_MANIFEST = load_runtime_manifest(Path(__file__).resolve().parents[2])
 CANDIDATE_RUNTIME_SOURCE_PATHS: Final = tuple(
     Path(value) for value in _SOURCE_MANIFEST["product_sources"]
 )
+CANDIDATE_CONFIGURATION_RELATIVE_PATH: Final = CANDIDATE_RUNTIME_SOURCE_PATHS[0]
+HISTORICAL_CONFIGURATION_RELATIVE_PATH: Final = Path("config.toml")
 CANDIDATE_HARNESS_SOURCE_PATHS: Final = tuple(
     Path(value) for value in _SOURCE_MANIFEST["harness_sources"]
 )
@@ -781,9 +783,9 @@ CANDIDATE_VERIFIED_SOURCE_PATHS: Final = (
     *CANDIDATE_RUNTIME_SOURCE_PATHS,
     *CANDIDATE_HARNESS_SOURCE_PATHS,
 )
-# Positional contract: product_sources index 0 is config.toml and indices
-# 1-3 are the three wired hook entry points in EXTRACTION order (PreToolUse
-# ^Bash$ matches first, UserPromptSubmit last), not config.toml document
+# Positional contract: product_sources index 0 is the candidate configuration
+# and indices 1-3 are the three wired hook entry points in EXTRACTION order
+# (PreToolUse ^Bash$ matches first, UserPromptSubmit last), not TOML document
 # order. verify_manifest_closure is a set comparison only; the positional
 # guard is solely trace_configured_source's strict zip; index 0 has no
 # positional guard.
@@ -823,8 +825,33 @@ RETAINED_STATE = ProfileScenario(
 )
 
 
+def resolve_configuration_source(code_root: Path) -> Path:
+    for relative in (
+        CANDIDATE_CONFIGURATION_RELATIVE_PATH,
+        HISTORICAL_CONFIGURATION_RELATIVE_PATH,
+    ):
+        path = code_root / relative
+        if path.is_symlink():
+            raise ProfileError(f"configuration source is linked: {relative}")
+        if path.exists():
+            if not path.is_file():
+                raise ProfileError(
+                    f"configuration source is not a regular file: {relative}"
+                )
+            return relative
+    raise ProfileError("configuration source is absent")
+
+
+def resolved_runtime_source_paths(code_root: Path) -> tuple[Path, ...]:
+    return (
+        resolve_configuration_source(code_root),
+        *CANDIDATE_RUNTIME_SOURCE_PATHS[1:],
+    )
+
+
 def configured_commands(code_root: Path) -> tuple[str, str, str]:
-    configuration = tomllib.loads((code_root / "config.toml").read_text())
+    source = code_root / resolve_configuration_source(code_root)
+    configuration = tomllib.loads(source.read_text(encoding="utf-8"))
     validator, reviewer = (
         entry["command"]
         for entry in configuration["hooks"]
@@ -847,7 +874,7 @@ def profile_commands(code_root: Path) -> tuple[str, str, str]:
 
 def discover_runtime_sources(code_root: Path) -> tuple[Path, ...]:
     """Discover the configured source closure without consulting the manifest."""
-    discovered = {Path("config.toml"), *CONFIGURED_HOOK_PATHS}
+    discovered = {resolve_configuration_source(code_root), *CONFIGURED_HOOK_PATHS}
     pending = list(CONFIGURED_HOOK_PATHS)
     path_pattern = re.compile(
         r"(?:\$HOOK_DIR/lib/|\$helper_dir/|\}\%/\*\}/)([A-Za-z0-9_.-]+)"
@@ -1160,7 +1187,10 @@ def _verify_candidate_sources(candidate_root: Path, commit: str) -> None:
 
 def _runtime_manifest(root: Path) -> tuple[tuple[str, str], ...]:
     entries: list[tuple[str, str]] = []
-    for relative in (RUNTIME_MANIFEST_RELATIVE_PATH, *CANDIDATE_RUNTIME_SOURCE_PATHS):
+    for relative in (
+        RUNTIME_MANIFEST_RELATIVE_PATH,
+        *resolved_runtime_source_paths(root),
+    ):
         path = root / relative
         if not path.is_file():
             if relative in (
@@ -1670,11 +1700,17 @@ def runtime_evidence_manifest(
         "product": {
             "parent": _file_entries(
                 parent_root,
-                (RUNTIME_MANIFEST_RELATIVE_PATH, *CANDIDATE_RUNTIME_SOURCE_PATHS),
+                (
+                    RUNTIME_MANIFEST_RELATIVE_PATH,
+                    *resolved_runtime_source_paths(parent_root),
+                ),
             ),
             "candidate": _file_entries(
                 candidate_root,
-                (RUNTIME_MANIFEST_RELATIVE_PATH, *CANDIDATE_RUNTIME_SOURCE_PATHS),
+                (
+                    RUNTIME_MANIFEST_RELATIVE_PATH,
+                    *resolved_runtime_source_paths(candidate_root),
+                ),
             ),
         },
         "harness": _file_entries(candidate_root, harness_paths),

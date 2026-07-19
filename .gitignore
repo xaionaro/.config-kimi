@@ -1,4 +1,5 @@
 # --- Sensitive data: credentials, tokens, identity ---
+/config.toml
 credentials/
 oauth/
 user-history/
