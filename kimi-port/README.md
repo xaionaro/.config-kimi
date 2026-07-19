@@ -6,9 +6,16 @@ ported, what is verified, and what remains as known limitation.
 ## Hook wiring
 
 - All hooks are wired via `config.toml` `[[hooks]]` entries (Kimi Code
-  native). The legacy JSON hook manifest (`hooks.json`) was removed in
-  the codex-legacy purge; tests assert the TOML wiring via a converted
-  view (`hooks_config_json` in `hooks/tests/run.sh`).
+  native): 10 entries covering 9 distinct scripts — session-snapshot.sh
+  (SessionStart), prompt-task-reminder.sh (UserPromptSubmit),
+  validate-bash.sh and edit-bash-pre-reviewer.sh (PreToolUse Bash),
+  validate-edit-write.sh, security-reminder.py, eci-active-gate.sh,
+  ate-orchestrator-gate.sh and edit-bash-pre-reviewer.sh again
+  (PreToolUse Edit/Write), stop-gate.sh (Stop). The legacy JSON hook
+  manifest (`hooks.json`) was removed in the codex-legacy purge; tests
+  assert the TOML wiring via the converted `hooks_config_json` view in
+  `hooks/tests/run.sh`. `hooks/system-prompt-reviewer.sh` is not wired
+  as a hook; stop-gate.sh invokes it internally.
 
 ## Naming policy
 
@@ -42,8 +49,10 @@ Status: FIXED.
 - Gate proofs (live, this deployment): an ECI implementer edited
   non-markdown files under the marker (allowed), a background-dispatched
   implementer was denied at the gate (fail-closed by design), a
-  batched-race probe was blocked, and the 19-case unit matrix passes in
-  `hooks/tests/run.sh`.
+  batched-race probe was blocked, and the subagent-detection helper
+  cases (10 detection tests; 3 more cover the warning channel),
+  ECI-gate kimi tests (3), and stop-gate kimi tests (8) pass in
+  `hooks/tests/run.sh` — 33 kimi-named tests in total across all groups.
 
 ## Known limitations
 
@@ -52,14 +61,27 @@ Status: FIXED.
   gate and are denied under a marker (fail-closed). ECI/ATE under a
   marker must use foreground agents. The Stop exemption covers them via
   `tasks/*.json`.
-- Legacy cwd-matched ECI markers (`<reserved-dir>/eci_active` with a
-  `cwd:` field) are still honored until the sessions that own the five
-  live markers disengage; removal is deferred until then.
+- Legacy cwd-matched ECI markers are honored for backward compatibility
+  by `kimi_legacy_eci_markers_for_cwd`; none currently exist — only the
+  four live session-scoped markers.
 - The pre-reviewer worker is inert on kimi: its admission gate
   (`kimi_hook_transcript_first_record_is_admissible`) always fails on
   kimi payloads, which carry no transcript_path. Enablement is deferred;
   the worker and its transcript-based tests remain for the codex-format
   fixtures.
+- `hooks/go-skill-gate.sh` is implemented and unit-tested but
+  intentionally not wired in `config.toml` (it only ever appeared in the
+  legacy, never-read `hooks.json`). Enabling a `.go` deny-gate is a
+  behavior change not yet approved.
+- The stop reviewer (`hooks/system-prompt-reviewer.sh`, invoked by
+  stop-gate.sh, not wired as a hook) runs transcript-blind on kimi:
+  kimi Stop payloads carry no `transcript_path`, and kimi session dirs
+  store no transcript JSONL (only `agents/main/wire.jsonl`, which the
+  `*<session_id>*.jsonl` fallback cannot match), so
+  USER_HISTORY/CURRENT_TURN always render '(no transcript found)'. With
+  no `KIMI_STOP_REVIEWER` backend configured it exits before any of
+  this. The codex-format transcript fixtures still feed its live render
+  tests; rendering from wire.jsonl is deferred.
 
 ## Purge log (codex-legacy removal)
 

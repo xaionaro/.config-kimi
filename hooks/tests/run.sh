@@ -1186,6 +1186,9 @@ JSON
   grep -qF '"kind":"wire-protocol-mismatch"' "$warn" || return 1
 
   if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
+  [ "$(wc -l <"$warn")" -eq 1 ] || return 1
+
+  if invoke_state_helper kimi_session_has_active_work "$input" "$output"; then return 1; fi
   [ "$(wc -l <"$warn")" -eq 1 ]
 }
 
@@ -1421,9 +1424,18 @@ test_stop_gate_kimi_own_marker_blocks_any_age() {
   is_stop_block "$out" &&
     json_field_contains "$out" '.reason // empty' "$proof_root/session_kimi-probe/eci_active" || return 1
 
-  write_kimi_main_wire "$wire" Agent no 2500 || return 1
+  fake_now=$(( $(date +%s%N) / 1000000 ))
+  date() {
+    if [ "${1:-}" = "+%s%N" ]; then printf '%s\n' "$(( fake_now * 1000000 ))"
+    else command date "$@"; fi
+  }
+  export fake_now
+  export -f date
+  write_kimi_main_wire "$wire" Agent no 2500 || { unset -f date; return 1; }
   run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || { unset -f date; return 1; }
+  unset -f date
+  unset fake_now
   json_field_equals "$out" '.continue // false' "true" || return 1
 
   write_kimi_main_wire "$wire" Agent no 3500 || return 1

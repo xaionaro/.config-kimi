@@ -506,9 +506,10 @@ kimi_wire_security_warning() {
 # open tool.call (no tool.result) whose record age is in [floor_ms,
 # KIMI_WIRE_OPEN_CALL_CEILING_MS]; anything unparseable yields no match.
 kimi_wire_open_call_age() {
-  local wire="$1" floor_ms="$2" now_ms="$3"
+  local wire="$1" floor_ms="$2" ceiling_ms="$3" now_ms="$4"
+  # floor/ceiling explicit at call sites: predicate [3000, 6h], active-work [0, 6h]
   # substr offsets: len('"toolCallId":"')=14 (+1 closing quote=15); len('"time":')=7 (+1 trailing brace=8).
-  awk -v now="$now_ms" -v floor="$floor_ms" -v ceil="$KIMI_WIRE_OPEN_CALL_CEILING_MS" '
+  awk -v now="$now_ms" -v floor="$floor_ms" -v ceil="$ceiling_ms" '
     index($0, "\"event\":{\"type\":\"tool.call\"") &&
       (index($0, "\"name\":\"Agent\"") || index($0, "\"name\":\"AgentSwarm\"")) {
       id = ""; t = ""
@@ -552,7 +553,7 @@ kimi_hook_is_subagent_context_wire() {
   fi
 
   now_ms=$(( $(date +%s%N) / 1000000 ))
-  kimi_wire_open_call_age "$wire" "$KIMI_WIRE_OPEN_CALL_FLOOR_MS" "$now_ms"
+  kimi_wire_open_call_age "$wire" "$KIMI_WIRE_OPEN_CALL_FLOOR_MS" "$KIMI_WIRE_OPEN_CALL_CEILING_MS" "$now_ms"
 }
 
 # Active-work exemption for Stop: returns 0 when the session's main wire or
@@ -598,8 +599,11 @@ kimi_session_has_active_work() {
   # does not apply here).
   wire="$session_dir/agents/main/wire.jsonl"
   [ -f "$wire" ] || return 1
-  head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"' || return 1
-  kimi_wire_open_call_age "$wire" 0 "$now_ms"
+  if ! head -n 1 "$wire" 2>/dev/null | grep -qF '"protocol_version":"1.4"'; then
+    kimi_wire_security_warning "$sid" "wire-protocol-mismatch"
+    return 1
+  fi
+  kimi_wire_open_call_age "$wire" 0 "$KIMI_WIRE_OPEN_CALL_CEILING_MS" "$now_ms"
 }
 
 # Pre-reviewer worker admission gate: admits payloads whose transcript is

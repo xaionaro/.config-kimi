@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "product_sources": [
-    "hooks.json",
+    "config.toml",
     "hooks/validate-bash.sh",
     "hooks/edit-bash-pre-reviewer.sh",
     "hooks/prompt-task-reminder.sh",

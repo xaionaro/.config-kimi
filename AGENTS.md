@@ -70,7 +70,7 @@
 
 ## Skills/Agents
 
-- Before substantive work, load every installed matching skill from `~/.kimi-code/skills`; slash-paired cells map positionally; matches are cumulative. Skill routing is instruction-only. One gate is wired: `hooks/go-skill-gate.sh` denies `.go` Edit/Write until a `go-coding-style` Skill load is recorded in the session wire.
+- Before substantive work, load every installed matching skill from `~/.kimi-code/skills`; slash-paired cells map positionally; matches are cumulative. Skill routing is instruction-only. No gate is currently wired: `hooks/go-skill-gate.sh` (implemented, unit-tested in run.sh) is intentionally not wired in config.toml; until enabled, skill loading follows the routing table without enforcement.
 
 | Trigger | Skill |
 |---|---|
