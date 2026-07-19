@@ -54,12 +54,6 @@ api_key = ""
 storage = "file"
 key = "oauth/kimi-code"
 
-
-# --- Ported from ~/.codex/hooks.json (codex setup) ---
-# NOTE: codex's apply_patch wiring is not ported (kimi has no apply_patch tool);
-# codex's SessionStart matcher value "clear" has no kimi equivalent and is dropped.
-# codex hook "statusMessage" fields have no kimi equivalent and are dropped.
-
 [[hooks]]
 event = "SessionStart"
 matcher = "startup|resume"
@@ -111,3 +105,4 @@ timeout = 75
 event = "Stop"
 command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/stop-gate.sh\"'"
 timeout = 300
+
