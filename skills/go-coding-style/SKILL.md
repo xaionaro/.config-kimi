@@ -75,7 +75,8 @@ func (n *NodeWithCustomData[C, T]) RemovePushTo(
 
 - `context.Context` is always the first parameter. Never stored in structs.
 - Goroutines via `observability.Go(ctx, func(ctx context.Context) { ... })`, never raw `go`.
-- **Least authority to mutate.** Prefer `sync/atomic` for single-word state. Prefer CAS optimistic retry (`CompareAndSwap` loop) for multi-step transitions that do not block. Hold a mutex only when the mutation spans multiple fields, guards an invariant atomics cannot express, or performs blocking work. Keep what a mutex guards narrow: split a long-lived state container from its transactional mutator so retries need not hold a global lock.
+- **Prefer atomics over locks.** Use `sync/atomic` for single-word state (`atomic.Pointer[T]` for pointers). Prefer CAS (`CompareAndSwap` loop) for multi-step non-blocking transitions. Hold a mutex only when the mutation cannot be swapped atomically, guards an invariant atomics cannot express, or performs blocking work.
+- **Narrow what a mutex guards.** Keep the critical section to the fields one invariant requires. Split a long-lived state container from the code that mutates it so retries need not hold a global lock. This narrows lock scope at runtime; **One audience per struct** narrows the data type by audience.
 - Mutex unlock always via `defer`. Prefer small functions that lock/defer-unlock at the top, rather than locking inside complex functions with multiple code paths.
 - **Timeouts are a design smell when the event is observable.** Reacting to a `time.Sleep`/`time.After`/poll-loop to "wait for" something that can be subscribed to (channel, `sync.Cond`, `ctx.Done()`, `fsnotify`, callback, signal) is a workaround, not a fix. Subscribe to the event. Reserve timeouts for genuinely opaque waits (network round-trip, hardware response, third-party process you cannot instrument) — and even then as an upper bound on top of the event, not a replacement for it.
 
