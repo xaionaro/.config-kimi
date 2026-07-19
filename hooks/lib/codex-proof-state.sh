@@ -432,7 +432,7 @@ codex_hook_transcript_first_record() {
 
   first_record="$(printf '%s' "$input" | \
     python3 "${BASH_SOURCE[0]%/*}/bounded_hook_input.py" \
-      hook-transcript-first-record "$HOME/.kimi-code/sessions" 2>/dev/null)" || return 1
+      hook-transcript-first-record "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" 2>/dev/null)" || return 1
   printf '%s\n' "$first_record"
 }
 
@@ -514,7 +514,7 @@ KIMI_TASK_DEFAULT_TIMEOUT_MS=10800000
 KIMI_TASK_DEADLINE_GRACE_MS=300000
 
 codex_hook_kimi_session_dir() {
-  local sid="$1" root="$HOME/.kimi-code/sessions" d
+  local sid="$1" root="${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" d
   codex_valid_session_id "$sid" || return 1
   for d in "$root"/*/"$sid"; do
     [ -d "$d" ] || continue
@@ -682,7 +682,7 @@ codex_path_owner_session_id() {
   done
 
   case "$path" in
-    "$HOME/.kimi-code/sessions/"*.jsonl)
+    "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions/"*.jsonl)
       base="${path##*/}"
       sid="$(printf '%s\n' "$base" | sed -nE 's/^rollout-[0-9T:-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/\1/p')"
       if codex_valid_session_id "$sid"; then

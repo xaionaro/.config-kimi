@@ -27,7 +27,7 @@ session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || 
 codex_valid_session_id "$session_id" || exit 0
 
 shopt -s nullglob
-wires=( "$HOME/.kimi-code/sessions"/*/"$session_id"/agents/*/wire.jsonl )
+wires=( "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions"/*/"$session_id"/agents/*/wire.jsonl )
 shopt -u nullglob
 [ "${#wires[@]}" -gt 0 ] || exit 0
 

@@ -40,7 +40,7 @@ find_transcript() {
     printf '%s\n' "$path"
     return 0
   fi
-  find "$HOME/.kimi-code/sessions" -name "*${session_id}*.jsonl" -type f 2>/dev/null | head -n1
+  find "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" -name "*${session_id}*.jsonl" -type f 2>/dev/null | head -n1
 }
 
 filter_reviewer_processes() {
