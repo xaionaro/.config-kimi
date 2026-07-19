@@ -1047,6 +1047,12 @@ invoke_state_helper() {
 # fake_now until unfreeze_time runs. Both the function and fake_now are
 # exported because run_hook/invoke_state_helper spawn env -u ... bash
 # children; unexported state does not propagate.
+# Every exit path between freeze and unfreeze must be guarded: run_case
+# runs tests in one shell, and a leaked date override would silently skew
+# later tests and real-elapsed perf assertions. The propagation
+# requirement (exported date function + exported fake_now) holds for both
+# env-spawn helper styles (run_hook's `env -u KIMI_ROLE bash` and
+# invoke_state_helper's `env HOME=... bash -c`).
 freeze_time_ms() {
   fake_now="$1"
   date() {
@@ -1288,13 +1294,15 @@ test_eci_active_gate_kimi_main_context_denies() {
   printf 'scope: test\n' >"$proof_root/session_kimi-probe/eci_active"
   dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/session_kimi-probe"
   wire="$dir/agents/main/wire.jsonl"
-  write_kimi_main_wire "$wire" Agent no 500 || return 1
+  freeze_time_ms "$(( $(date +%s%N) / 1000000 ))"
+  write_kimi_main_wire "$wire" Agent no 500 || { unfreeze_time; return 1; }
   input="$TMP_ROOT/eci-kimi-main.json"
-  jq '.session_id = "session_kimi-probe"' "$FIXTURES/eci-apply-patch-code.json" >"$input"
+  jq '.session_id = "session_kimi-probe"' "$FIXTURES/eci-apply-patch-code.json" >"$input" || { unfreeze_time; return 1; }
   out="$TMP_ROOT/eci-kimi-main.out"
 
   run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
+    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || { unfreeze_time; return 1; }
+  unfreeze_time
 
   is_pretool_deny "$out"
 }
