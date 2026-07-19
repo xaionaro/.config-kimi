@@ -53,7 +53,7 @@ The PreToolUse gate `~/.kimi-code/hooks/eci-active-gate.sh` denies direct Edit/W
 
 | Step | Command | When |
 |------|---------|------|
-| Engage | `~/.kimi-code/bin/eci-active on "<task + scope>"` | Before Step 1 of the first iteration |
+| Engage | `KIMI_SESSION_ID=<session_… id from the hook_result context line> ~/.kimi-code/bin/eci-active on "<task + scope>"` (if no id is in context, run the command bare; on refusal, re-run with the id it prints) | Before Step 1 of the first iteration |
 | Disengage | See Teardown sequence below | Clean pass or user closes ECI through protocol or root-scope replacement |
 | Hard escalate | Report blocker requiring user input; marker stays active | ECI cannot proceed without user input |
 

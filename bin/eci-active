@@ -14,49 +14,75 @@ Usage:
   eci-active status
 
 Set KIMI_SESSION_ID, or KIMI_THREAD_ID when KIMI_SESSION_ID is
-unset, to target a session. Without either, the newest real session
-directory under the proof root is used. Cwd-scoped ECI state is never
-created.
+unset, to target a session explicitly (unprefixed ids are normalized
+to the session_ wire form). Without either, the owning session is
+resolved from the kimi ancestor's cwd: sessions whose state.json
+workDir matches, freshest wire (<300s) wins; ties and misses refuse
+loudly. Cwd-scoped ECI state is never created.
 EOF
 }
 
-resolve_session_dir() {
-  local root name newest="" newest_mtime=0 d mtime session_id session_var
-  root="$(kimi_proof_root)"
-
-  if [ -n "${KIMI_SESSION_ID:-}" ]; then
-    session_id="$KIMI_SESSION_ID"
-    session_var="KIMI_SESSION_ID"
-  elif [ -n "${KIMI_THREAD_ID:-}" ]; then
-    session_id="$KIMI_THREAD_ID"
-    session_var="KIMI_THREAD_ID"
-  fi
-
-  if [ -n "${session_id:-}" ]; then
-    kimi_valid_session_id "$session_id" || {
-      echo "Invalid $session_var; use only letters, digits, '_' or '-'." >&2
-      exit 1
-    }
-    printf '%s/%s\n' "$root" "$session_id"
-    return
-  fi
-
-  [ -d "$root" ] || return 1
-  shopt -s nullglob
-  for d in "$root"/*/; do
-    d="${d%/}"
-    name="${d##*/}"
-    kimi_valid_session_id "$name" || continue
-    kimi_reserved_proof_dir "$name" && continue
-    mtime=$(stat -c '%Y' "$d" 2>/dev/null) || continue
-    if [ "$mtime" -gt "$newest_mtime" ]; then
-      newest_mtime="$mtime"
-      newest="$d"
-    fi
+# Test seams (used by the resolver tests in hooks/tests/run.sh; never set
+# in production): KIMI_ECI_ACTIVE_TEST_KCWD bypasses the ancestry probe
+# with a fixed cwd, and a pre-defined resolve_kimi_ancestor_cwd function
+# (export -f a stub) replaces the probe entirely.
+if ! declare -F resolve_kimi_ancestor_cwd >/dev/null 2>&1; then
+resolve_kimi_ancestor_cwd() {
+  local pid=$$ kimi_pid="" _comm _ppid
+  while [ "$pid" != "1" ] && [ -n "$pid" ]; do
+    read -r _comm _ppid < <(awk '{print $2, $4}' "/proc/$pid/stat" 2>/dev/null) || break
+    _comm="${_comm#(}"; _comm="${_comm%)}"
+    if [ "$_comm" = "kimi" ]; then kimi_pid="$pid"; break; fi
+    pid="$_ppid"
   done
-  shopt -u nullglob
-  [ -n "$newest" ] || return 1
-  printf '%s\n' "$newest"
+  [ -n "$kimi_pid" ] || return 1
+  readlink "/proc/$kimi_pid/cwd" 2>/dev/null
+}
+fi
+
+resolve_session_dir() {
+  root="$(kimi_proof_root)"; sessions_root="${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions"
+
+  # explicit sid: normalize form + verify, never mint wrong-form dirs
+  if [ -n "${KIMI_SESSION_ID:-${KIMI_THREAD_ID:-}}" ]; then
+    sid="${KIMI_SESSION_ID:-$KIMI_THREAD_ID}"
+    kimi_valid_session_id "$sid" || { echo "Invalid session id: $sid" >&2; exit 1; }
+    case "$sid" in session_*) alt="${sid#session_}" ;; *) alt="session_$sid" ;; esac
+    if kimi_session_dir_for_id "$sid" >/dev/null 2>&1; then printf '%s/%s\n' "$root" "$sid"; return 0; fi
+    if [ -n "$alt" ] && kimi_session_dir_for_id "$alt" >/dev/null 2>&1; then printf '%s/%s\n' "$root" "$alt"; return 0; fi
+    if [ -d "$root/$sid" ]; then printf '%s/%s\n' "$root" "$sid"; return 0; fi
+    echo "eci-active: no session '$sid' under $sessions_root; known: $(ls "$sessions_root"/*/ -d 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')" >&2; exit 1
+  fi
+
+  if [ -n "${KIMI_ECI_ACTIVE_TEST_KCWD:-}" ]; then
+    kcwd="$KIMI_ECI_ACTIVE_TEST_KCWD"
+  else
+    kcwd="$(resolve_kimi_ancestor_cwd)" || { echo "eci-active: no kimi ancestor found; re-run with KIMI_SESSION_ID=session_<uuid>" >&2; exit 1; }
+    [ -n "$kcwd" ] || { echo "eci-active: cannot read /proc/$kimi_pid/cwd; re-run with KIMI_SESSION_ID=session_<uuid>" >&2; exit 1; }
+  fi
+
+  # candidates: hash bucket, then realpath cross-check, then full state.json scan
+  key="$(printf '%s' "$kcwd" | sha256sum | cut -c1-12)"
+  kcwd_real="$(realpath "$kcwd")"
+  candidates=()
+  for sdir in "$sessions_root"/wd_*_"$key"/session_*/ "$sessions_root"/*/session_*/; do
+    [ -f "$sdir/state.json" ] || continue
+    swd="$(jq -r '.workDir // empty' "$sdir/state.json" 2>/dev/null)"; [ -n "$swd" ] || continue
+    [ "$(realpath "$swd" 2>/dev/null)" = "$kcwd_real" ] || continue
+    case " ${candidates[*]:-} " in *" ${sdir%/} "*) continue ;; esac
+    candidates+=("${sdir%/}")
+  done
+
+  fresh=(); now="$(date +%s)"; FRESH=300
+  for c in ${candidates[@]+"${candidates[@]}"}; do
+    w="$c/agents/main/wire.jsonl"; [ -f "$w" ] || continue
+    m="$(stat -c '%Y' "$w" 2>/dev/null)" || continue
+    [ $(( now - m )) -lt "$FRESH" ] && fresh+=("$c")
+  done
+
+  # freshness floor applies to every bind path
+  if [ "${#fresh[@]}" -eq 1 ]; then printf '%s/%s\n' "$root" "${fresh[0]##*/}"; return 0; fi
+  echo "eci-active: could not determine owning session for cwd $kcwd (candidates: ${candidates[*]:-none}; fresh<300s: ${fresh[*]:-none}); re-run with KIMI_SESSION_ID=session_<uuid>" >&2; exit 1
 }
 
 validate_disengage_report() {

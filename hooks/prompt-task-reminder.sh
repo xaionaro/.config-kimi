@@ -136,3 +136,14 @@ if kimi_valid_session_id "$session_id"; then
   fi
 
 fi
+
+# Surface the session id into context only while the session is engaged
+# (ECI or ATE marker present): that is when disengage/status by explicit
+# id matters. Unengaged prompts stay silent.
+if kimi_valid_session_id "$session_id"; then
+  if [ -f "$root/$session_id/eci_active" ] ||
+    kimi_existing_state_file ate ate_active "$session_id" "$cwd" >/dev/null 2>&1; then
+    jq -n --arg sid "$session_id" '{message: ("KIMI_SESSION_ID=" + $sid)}'
+  fi
+fi
+exit 0

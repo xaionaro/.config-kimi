@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Write the ATE active marker for the current Kimi session with session-id
+# normalization: unprefixed and session_-prefixed forms name the same
+# session (uuid is the identity); the exact wire form always wins.
+
+set -euo pipefail
+
+base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$base_dir/hooks/lib/kimi-proof-state.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ate-marker <phase> "<task + scope>"
+Set KIMI_SESSION_ID, or KIMI_THREAD_ID when KIMI_SESSION_ID is unset,
+from the hook_result context line.
+EOF
+}
+
+phase="${1:-}"
+scope="${2:-}"
+[ -n "$phase" ] && [ -n "$scope" ] || { usage; exit 2; }
+
+sid="${KIMI_SESSION_ID:-${KIMI_THREAD_ID:-}}"
+[ -n "$sid" ] || {
+  echo "ate-marker: no session id; export KIMI_SESSION_ID from the hook_result context line" >&2
+  exit 1
+}
+kimi_valid_session_id "$sid" || { echo "Invalid session id: $sid" >&2; exit 1; }
+
+case "$sid" in
+  session_?*) alt="${sid#session_}" ;;
+  *)         alt="session_$sid" ;;
+esac
+
+root="$(kimi_proof_root)"
+state_dir=""
+
+if kimi_session_dir_for_id "$sid" >/dev/null 2>&1; then
+  state_dir="$sid"
+elif kimi_session_dir_for_id "$alt" >/dev/null 2>&1; then
+  state_dir="$alt"
+else
+  exact="$root/ate/sessions/$sid"
+  derived="$root/ate/sessions/$alt"
+  if [ -f "$exact/ate_active" ] && [ -f "$derived/ate_active" ]; then
+    state_dir="both"
+  elif [ -f "$exact/ate_active" ]; then
+    state_dir="$sid"
+  elif [ -f "$derived/ate_active" ]; then
+    state_dir="$alt"
+  else
+    echo "ate-marker: no session '$sid' (expected wire form $alt) and no existing marker; refusing to mint a new session marker" >&2
+    exit 1
+  fi
+fi
+
+write_marker() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
+  {
+    printf 'phase: %s\n' "$phase"
+    printf 'scope: %s\n' "$scope"
+    printf 'cwd: %s\n' "$PWD"
+    printf 'session_id: %s\n' "$sid"
+    date -u '+updated_utc: %Y-%m-%dT%H:%M:%SZ'
+  } >"$target"
+}
+
+if [ "$state_dir" = both ]; then
+  write_marker "$root/ate/sessions/$sid/ate_active"
+  write_marker "$root/ate/sessions/$alt/ate_active"
+  printf 'ATE marker: %s and %s\n' \
+    "$root/ate/sessions/$sid/ate_active" "$root/ate/sessions/$alt/ate_active"
+else
+  marker="$root/ate/sessions/$state_dir/ate_active"
+  write_marker "$marker"
+  printf 'ATE marker: %s\n' "$marker"
+fi

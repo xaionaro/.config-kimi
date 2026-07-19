@@ -172,12 +172,23 @@ kimi_existing_state_file() {
   local filename="$2"
   local session_id="${3:-}"
   local cwd="${4:-}"
-  local dir path
+  local dir path sid derived=""
 
+  # Unprefixed and session_-prefixed forms name the same session (uuid is
+  # the identity); the exact literal form always wins, the derived form is
+  # retried at the same level before moving on.
   if kimi_valid_session_id "$session_id"; then
-    dir="$(kimi_session_state_dir "$kind" "$session_id")" || return 1
-    path="$dir/$filename"
-    [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
+    case "$session_id" in
+      session_?*) derived="${session_id#session_}" ;;
+      session_)  derived="" ;;
+      *)         derived="session_$session_id" ;;
+    esac
+    for sid in "$session_id" "$derived"; do
+      [ -n "$sid" ] || continue
+      dir="$(kimi_session_state_dir "$kind" "$sid")" || continue
+      path="$dir/$filename"
+      [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
   fi
 
   if [ -n "$cwd" ]; then
@@ -187,8 +198,11 @@ kimi_existing_state_file() {
   fi
 
   if kimi_valid_session_id "$session_id"; then
-    path="$(kimi_proof_root)/$session_id/$filename"
-    [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
+    for sid in "$session_id" "$derived"; do
+      [ -n "$sid" ] || continue
+      path="$(kimi_proof_root)/$session_id/$filename"
+      [ -f "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
   fi
 
   return 1

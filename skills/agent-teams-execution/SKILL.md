@@ -53,36 +53,16 @@ If the main/orchestrator lacks standard agent tools too, hard-escalate. Never si
 Before the first teammate spawn, create the marker the stop gate reads:
 
 ```bash
-. "${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/lib/kimi-proof-state.sh"
+export KIMI_SESSION_ID=<session_… id from the hook_result context line>
 
 update_ate_marker() {
-  phase="$1"
-  scope="$2"
-  session_id="${KIMI_SESSION_ID:-${KIMI_THREAD_ID:-}}"
-  if [ -n "$session_id" ]; then
-    kimi_valid_session_id "$session_id" || {
-      echo "Invalid ATE session id: $session_id" >&2
-      exit 1
-    }
-    marker="$(kimi_session_state_dir ate "$session_id")/ate_active"
-  else
-    marker="$(kimi_cli_state_file ate ate_active true)"
-  fi
-
-  mkdir -p "$(dirname "$marker")"
-  {
-    printf 'phase: %s\n' "$phase"
-    printf 'scope: %s\n' "$scope"
-    printf 'cwd: %s\n' "$PWD"
-    [ -n "$session_id" ] && printf 'session_id: %s\n' "$session_id"
-    date -u '+updated_utc: %Y-%m-%dT%H:%M:%SZ'
-  } >"$marker"
+  "${KIMI_CODE_HOME:-$HOME/.kimi-code}/bin/ate-marker" "$1" "$2"
 }
 
 update_ate_marker research "<task + scope>"
 ```
 
-At every phase transition, run `update_ate_marker <phase> "<task + scope>"`. It recomputes the `ate_active` path and writes `phase: <phase>`, `scope`, `cwd`, optional `session_id`, and `updated_utc`.
+At every phase transition, run `update_ate_marker <phase> "<task + scope>"`. It resolves the `ate_active` path through `bin/ate-marker` (unprefixed ids are normalized to the `session_` wire form; unknown sessions refuse loudly) and writes `phase: <phase>`, `scope`, `cwd`, `session_id`, and `updated_utc`.
 
 Active phases: `research`, `design`, `execution`, `testing`, `qa`, `unblocking`.
 
