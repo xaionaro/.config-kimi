@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = Path("hooks/edit-bash-pre-reviewer.sh")
 CONTROLLER = Path("hooks/lib/edit_bash_pre_reviewer_controller.py")
-HOOKS_JSON = Path("hooks.json")
+HOOKS_CONFIG = Path("config.toml")
 SPEC = Path("proofs/Spec/PreReviewerController.lean")
 PROOFS = Path("proofs/Proofs/PreReviewerController.lean")
 LIFECYCLE = Path("hooks/tests/pre_reviewer_lifecycle.py")
@@ -56,10 +56,10 @@ REQUIRED: dict[Path, tuple[str, ...]] = {
         "os.waitpid(pid, os.WNOHANG)",
         "os.kill(pid, signal.SIGKILL)",
     ),
-    HOOKS_JSON: (
-        '"statusMessage": "Checking shell command"',
-        '"statusMessage": "Checking first tool call"',
-        '"timeout": 75',
+    HOOKS_CONFIG: (
+        'event = "PreToolUse"',
+        'matcher = "^Bash$"',
+        'timeout = 75',
     ),
     SPEC: (
         "publicationStarted : Bool",
@@ -208,9 +208,9 @@ MUTATIONS: tuple[tuple[str, Path, str, str], ...] = (
     ),
     (
         "registration-timeout",
-        HOOKS_JSON,
-        '"timeout": 75',
-        '"timeout": 74',
+        HOOKS_CONFIG,
+        "timeout = 75",
+        "timeout = 74",
     ),
 )
 

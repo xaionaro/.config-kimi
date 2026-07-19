@@ -8,6 +8,7 @@ from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 import hashlib
 import json
+import tomllib
 import os
 from pathlib import Path
 import re
@@ -817,16 +818,17 @@ RETAINED_STATE = ProfileScenario(
 
 
 def configured_commands(code_root: Path) -> tuple[str, str, str]:
-    configuration = json.loads((code_root / "hooks.json").read_text())
-    bash_group = next(
-        group
-        for group in configuration["hooks"]["PreToolUse"]
-        if group["matcher"] == "^Bash$"
+    configuration = tomllib.loads((code_root / "config.toml").read_text())
+    validator, reviewer = (
+        entry["command"]
+        for entry in configuration["hooks"]
+        if entry.get("event") == "PreToolUse" and entry.get("matcher") == "^Bash$"
     )
-    validator, reviewer = (item["command"] for item in bash_group["hooks"])
-    prompt = configuration["hooks"]["UserPromptSubmit"][0]["hooks"][0][
-        "command"
-    ]
+    prompt = next(
+        entry["command"]
+        for entry in configuration["hooks"]
+        if entry.get("event") == "UserPromptSubmit"
+    )
     return validator, reviewer, prompt
 
 
@@ -839,7 +841,7 @@ def profile_commands(code_root: Path) -> tuple[str, str, str]:
 
 def discover_runtime_sources(code_root: Path) -> tuple[Path, ...]:
     """Discover the configured source closure without consulting the manifest."""
-    discovered = {Path("hooks.json"), *CONFIGURED_HOOK_PATHS}
+    discovered = {Path("config.toml"), *CONFIGURED_HOOK_PATHS}
     pending = list(CONFIGURED_HOOK_PATHS)
     path_pattern = re.compile(
         r"(?:\$HOOK_DIR/lib/|\$helper_dir/|\}\%/\*\}/)([A-Za-z0-9_.-]+)"

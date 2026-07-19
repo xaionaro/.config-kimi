@@ -26,21 +26,6 @@ kimi_reserved_proof_dir() {
   esac
 }
 
-kimi_real_session_dir_name() {
-  [[ "${1:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]
-}
-
-kimi_proof_alias_session_id() {
-  local dir="$1"
-  local marker session_id
-
-  marker="$dir/.kimi-proof-alias"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  session_id="$(awk -F':[[:space:]]*' '$1 == "session_id" { print $2; exit }' "$marker" 2>/dev/null | tr -d '\r')"
-  kimi_valid_session_id "$session_id" || return 1
-  printf '%s\n' "$session_id"
-}
-
 kimi_canonical_cwd() {
   local cwd="${1:-$PWD}"
   if [ -d "$cwd" ]; then
@@ -426,28 +411,9 @@ kimi_bind_side_stop_to_session() {
   cp "$file" "$dir/side_stop"
 }
 
-kimi_hook_transcript_first_record() {
-  local input="${1:-}"
-  local first_record
-
-  first_record="$(printf '%s' "$input" | \
-    python3 "${BASH_SOURCE[0]%/*}/bounded_hook_input.py" \
-      hook-transcript-first-record "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" 2>/dev/null)" || return 1
-  printf '%s\n' "$first_record"
-}
-
 kimi_hook_is_subagent_context() {
   local input="${1:-}"
-  local first_record
 
-  if first_record="$(kimi_hook_transcript_first_record "$input")"; then
-    if printf '%s' "$first_record" | jq -e '
-      .type == "session_meta" and
-      (.payload.source.subagent.thread_spawn? != null)
-    ' >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
   kimi_hook_is_subagent_context_wire "$input"
 }
 
@@ -636,25 +602,22 @@ kimi_session_has_active_work() {
   kimi_wire_open_call_age "$wire" 0 "$now_ms"
 }
 
+# Pre-reviewer worker admission gate: admits payloads whose transcript is
+# readable. Kimi payloads carry no transcript_path, so this always fails
+# for them and the pre-reviewer worker stays inert on kimi; enablement is
+# deferred (see kimi-port/README.md).
 kimi_hook_transcript_first_record_is_admissible() {
   local input="${1:-}"
 
-  kimi_hook_transcript_first_record "$input" >/dev/null
-}
-
-kimi_hook_parent_session_id() {
-  local input="${1:-}"
-  local first_record
-
-  first_record="$(kimi_hook_transcript_first_record "$input")" || return 1
-  printf '%s' "$first_record" | jq -r '
-    .payload.source.subagent.thread_spawn.parent_thread_id // empty
-  ' 2>/dev/null
+  printf '%s' "$input" | \
+    python3 "${BASH_SOURCE[0]%/*}/bounded_hook_input.py" \
+      hook-transcript-first-record "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions" \
+      >/dev/null 2>&1
 }
 
 kimi_path_owner_session_id() {
   local path="$1"
-  local root default_root rest sid base alias_session_id
+  local root default_root rest sid
 
   [ -n "$path" ] || return 1
 
@@ -667,13 +630,6 @@ kimi_path_owner_session_id() {
         rest="${path#"$root"/}"
         sid="${rest%%/*}"
         kimi_reserved_proof_dir "$sid" && return 1
-        if ! kimi_real_session_dir_name "$sid"; then
-          alias_session_id="$(kimi_proof_alias_session_id "$root/$sid" 2>/dev/null || true)"
-          if [ -n "$alias_session_id" ]; then
-            printf '%s\n' "$alias_session_id"
-            return 0
-          fi
-        fi
         kimi_valid_session_id "$sid" || return 1
         printf '%s\n' "$sid"
         return 0
@@ -681,32 +637,16 @@ kimi_path_owner_session_id() {
     esac
   done
 
-  case "$path" in
-    "${KIMI_CODE_HOME:-$HOME/.kimi-code}/sessions/"*.jsonl)
-      base="${path##*/}"
-      sid="$(printf '%s\n' "$base" | sed -nE 's/^rollout-[0-9T:-]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/\1/p')"
-      if kimi_valid_session_id "$sid"; then
-        printf '%s\n' "$sid"
-        return 0
-      fi
-      ;;
-  esac
-
   return 1
 }
 
 kimi_hook_allowed_session_ids() {
   local input="$1"
-  local session_id parent_session_id
+  local session_id
 
   session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
   if kimi_valid_session_id "$session_id"; then
     printf '%s\n' "$session_id"
-  fi
-
-  parent_session_id="$(kimi_hook_parent_session_id "$input" 2>/dev/null || true)"
-  if kimi_valid_session_id "$parent_session_id" && [ "$parent_session_id" != "$session_id" ]; then
-    printf '%s\n' "$parent_session_id"
   fi
 }
 

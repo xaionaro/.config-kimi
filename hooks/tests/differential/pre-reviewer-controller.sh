@@ -17,7 +17,7 @@ PRUNER="$ROOT/hooks/lib/prune_pre_reviewer_turn_state.py"
 REVIEWER_CALL="$ROOT/hooks/lib/reviewer-call.sh"
 PROFILER="$ROOT/hooks/tests/profile_pre_reviewer_ab.py"
 WATCHDOG="$ROOT/hooks/tests/process-watchdog.py"
-HOOK_CONFIG="$ROOT/hooks.json"
+HOOK_CONFIG="$ROOT/config.toml"
 
 resolve_tool() {
   local tool="$1" resolved
@@ -189,9 +189,21 @@ PY
   backend="$(env -i PATH=/usr/bin:/bin bash -c \
     '. "$1"; printf "%s\n" "$KIMI_EDIT_PRE_REVIEWER_TIMEOUT"' \
     bash "$REVIEWER_CALL")" || return 1
-  hook="$(jq -r \
-    '.hooks.PreToolUse[] | select(.matcher == "^Bash$") | .hooks[] | select(.statusMessage == "Checking first tool call") | .timeout' \
-    "$HOOK_CONFIG")" || return 1
+  hook="$(python3 - "$HOOK_CONFIG" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    config = tomllib.load(handle)
+print(next(
+    entry["timeout"]
+    for entry in config["hooks"]
+    if entry.get("event") == "PreToolUse"
+    and entry.get("matcher") == "^Bash$"
+    and entry["command"].endswith("/edit-bash-pre-reviewer.sh\"'")
+))
+PY
+)" || return 1
   [ -n "$hook" ] || return 1
   state_dir="$(mktemp -d "${TMPDIR:-/tmp}/pre-reviewer-lock-check.XXXXXX")" || return 1
   chmod 0700 "$state_dir" || { rm -rf -- "$state_dir"; return 1; }

@@ -67,7 +67,6 @@ cleanup() {
   local status=$?
   trap - EXIT
   if [ -n "${TMP_ROOT:-}" ] && [ -d "$TMP_ROOT" ]; then
-    rm -f "$(subagent_transcript_path 2>/dev/null || true)" 2>/dev/null || true
     rm -rf "$TMP_ROOT"
   fi
   if [ -n "${FORMAL_TMP_ROOT:-}" ] && [ -d "$FORMAL_TMP_ROOT" ]; then
@@ -250,6 +249,31 @@ json_field_not_contains() {
   ! json_field_contains "$@"
 }
 
+# Render config.toml [[hooks]] entries as the nested event/matcher JSON
+# shape the wiring assertions below were written against.
+hooks_config_json() {
+  python3 - "$ROOT/config.toml" <<'PY'
+import json
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    config = tomllib.load(handle)
+grouped = {}
+for entry in config.get("hooks", []):
+    event = entry["event"]
+    matcher = entry.get("matcher", "")
+    body = {key: value for key, value in entry.items() if key not in ("event", "matcher")}
+    for group in grouped.setdefault(event, []):
+        if group["matcher"] == matcher:
+            group["hooks"].append(body)
+            break
+    else:
+        grouped[event].append({"matcher": matcher, "hooks": [body]})
+json.dump({"hooks": grouped}, sys.stdout)
+PY
+}
+
 run_hook() {
   local outfile="$1"
   local script="$2"
@@ -278,9 +302,6 @@ fresh_proof_root() {
   printf '%s\n' "$root"
 }
 
-subagent_transcript_path() {
-  printf '%s/home/.kimi-code/sessions/kimi-hooks-test-subagent.jsonl\n' "$TMP_ROOT"
-}
 
 with_cwd_fixture() {
   local src="$1"
@@ -467,7 +488,7 @@ test_prompt_state_config_is_wired_without_probe() {
     ([.hooks.PostToolUse[]?.hooks[]?.command] | length == 0) and
     ([.. | objects | .command? // empty]
       | all(contains("/hooks/tests/skill-event-probe.sh") | not))
-  ' "$ROOT/hooks.json" >/dev/null
+  ' <(hooks_config_json) >/dev/null
 }
 
 test_prompt_state_keeps_nontrivial_governance_task_silent() {
@@ -689,9 +710,9 @@ test_prompt_state_leaves_rust_config_silent() {
     "Update config.toml for the Rust app."
 }
 
-test_prompt_state_leaves_web_app_hooks_json_silent() {
-  prompt_state_prompt_stays_silent "prompt-web-app-hooks-json-silent" \
-    "Modify hooks.json for my web app."
+test_prompt_state_leaves_web_app_config_silent() {
+  prompt_state_prompt_stays_silent "prompt-web-app-config-silent" \
+    "Modify config.toml for my web app."
 }
 
 test_prompt_state_leaves_caveman_story_silent() {
@@ -985,49 +1006,8 @@ test_eci_gate_blocks_kimi_role_spoof() {
   is_pretool_deny "$out"
 }
 
-write_subagent_transcript() {
-  local path="$1"
-  mkdir -p "$(dirname "$path")" || return 1
-  cat >"$path" <<'JSON'
-{"timestamp":"2026-05-04T00:00:00.000Z","type":"session_meta","payload":{"id":"t00-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session","depth":1,"agent_nickname":"Test","agent_role":"default"}}}}}
-JSON
-}
 
-write_first_record_scoped_subagent_transcript() {
-  local path="$1"
-  local record_bytes="$2"
-  local include_newline="${3:-yes}"
-  local include_history="${4:-yes}"
-  local prefix suffix newline_bytes padding_length history_prefix history_suffix
-  prefix='{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session"}}}},"padding":"'
-  suffix='"}'
-  newline_bytes=1
-  [ "$include_newline" = yes ] || newline_bytes=0
-  padding_length=$((record_bytes - ${#prefix} - ${#suffix} - newline_bytes))
-  [ "$padding_length" -ge 0 ] || return 1
-  mkdir -p "$(dirname "$path")" || return 1
-  printf '%s%*s%s' "$prefix" "$padding_length" '' "$suffix" | tr ' ' x >"$path"
-  [ "$include_newline" = yes ] && printf '\n' >>"$path"
-  if [ "$include_history" = yes ]; then
-    history_prefix='{"padding":"'
-    history_suffix='","sentinel":"DEEP_SECOND_RECORD_SENTINEL"}'
-    printf '%s%*s%s\n' "$history_prefix" 1048576 '' "$history_suffix" | tr ' ' y >>"$path"
-  fi
-  [ "$record_bytes" -eq "$(head -c "$record_bytes" "$path" | wc -c)" ]
-}
 
-trace_first_record_helper() {
-  local helper="$1"
-  local transcript="$2"
-  local output="$3"
-  local trace="$4"
-
-  strace -f -qq -s 8192 -e trace=read -P "$transcript" -o "$trace" \
-    env HOME="$TMP_ROOT/home" bash -c '. "$1"; "$2" "$3"' \
-    bash "$ROOT/hooks/lib/kimi-proof-state.sh" "$helper" \
-    "$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')" \
-    >"$output" 2>"$output.err"
-}
 
 trace_read_bytes() {
   local trace="$1"
@@ -1059,122 +1039,9 @@ invoke_state_helper() {
     >"$output" 2>"$output.err"
 }
 
-test_subagent_helper_rejects_oversize_first_record() {
-  local label record_bytes transcript output trace
-  for label in short boundary large; do
-    case "$label" in
-      short) record_bytes=256 ;;
-      boundary) record_bytes=4096 ;;
-      large) record_bytes=1048576 ;;
-    esac
-    transcript="$TMP_ROOT/home/.kimi-code/sessions/first-record-subagent-$label.jsonl"
-    output="$TMP_ROOT/first-record-subagent-$label.out"
-    trace="$TMP_ROOT/first-record-subagent-$label.strace"
-    write_first_record_scoped_subagent_transcript "$transcript" "$record_bytes" || return 1
-    if [ "$label" = large ]; then
-      if trace_first_record_helper kimi_hook_is_subagent_context \
-          "$transcript" "$output" "$trace"; then
-        return 1
-      fi
-    else
-      trace_first_record_helper kimi_hook_is_subagent_context \
-        "$transcript" "$output" "$trace" || return 1
-    fi
-    [ ! -s "$output" ] && trace_is_first_record_scoped "$trace" "$transcript" || return 1
-  done
-}
 
-test_parent_helper_rejects_oversize_first_record() {
-  local transcript output trace
-  transcript="$TMP_ROOT/home/.kimi-code/sessions/first-record-parent-large.jsonl"
-  output="$TMP_ROOT/first-record-parent-large.out"
-  trace="$TMP_ROOT/first-record-parent-large.strace"
-  write_first_record_scoped_subagent_transcript "$transcript" 1048576 || return 1
 
-  if trace_first_record_helper kimi_hook_parent_session_id \
-      "$transcript" "$output" "$trace"; then
-    return 1
-  fi
-  [ ! -s "$output" ] && trace_is_first_record_scoped "$trace" "$transcript"
-}
 
-test_first_record_helpers_reject_oversize_without_final_newline() {
-  local transcript input output
-  transcript="$TMP_ROOT/home/.kimi-code/sessions/first-record-no-final-newline.jsonl"
-  output="$TMP_ROOT/first-record-no-final-newline.out"
-  write_first_record_scoped_subagent_transcript "$transcript" 1048576 no no || return 1
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then
-    return 1
-  fi
-  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then
-    return 1
-  fi
-  [ ! -s "$output" ]
-}
-
-test_first_record_helpers_preserve_boundary_behavior() {
-  local dir transcript input output
-  dir="$TMP_ROOT/home/.kimi-code/sessions"
-  mkdir -p "$dir" || return 1
-
-  transcript="$dir/boundary-subagent.jsonl"
-  write_subagent_transcript "$transcript" || return 1
-  input="$(jq -cn --arg transcript "$transcript" --arg sid child-session \
-    '{transcript_path: $transcript, session_id: $sid}')"
-  output="$TMP_ROOT/boundary-subagent.out"
-  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
-  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || return 1
-  [ "$(cat "$output")" = parent-session ] || return 1
-
-  transcript="$dir/boundary-no-final-newline.jsonl"
-  printf '%s' "$(cat "$dir/boundary-subagent.jsonl")" >"$transcript"
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  invoke_state_helper kimi_hook_is_subagent_context "$input" "$output" || return 1
-  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || return 1
-  [ "$(cat "$output")" = parent-session ] || return 1
-
-  transcript="$dir/boundary-empty.jsonl"
-  : >"$transcript"
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
-  [ ! -s "$output" ] || return 1
-
-  transcript="$dir/boundary-malformed.jsonl"
-  printf '%s\n' '{malformed' >"$transcript"
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
-  [ ! -s "$output" ] || return 1
-
-  transcript="$dir/boundary-missing.jsonl"
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then return 1; fi
-
-  transcript="$dir/boundary-main.jsonl"
-  write_main_transcript "$transcript" || return 1
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  invoke_state_helper kimi_hook_parent_session_id "$input" "$output" || true
-  [ ! -s "$output" ] || return 1
-
-  transcript="$dir/boundary-invalid-parent.jsonl"
-  printf '%s\n' '{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"../bad"}}}}}' >"$transcript"
-  input="$(jq -cn --arg transcript "$transcript" --arg sid child-session \
-    '{transcript_path: $transcript, session_id: $sid}')"
-  invoke_state_helper kimi_hook_allowed_session_ids "$input" "$output" || return 1
-  [ "$(cat "$output")" = child-session ] || return 1
-
-  transcript="$TMP_ROOT/outside-restricted-session-path.jsonl"
-  write_subagent_transcript "$transcript" || return 1
-  input="$(jq -cn --arg transcript "$transcript" '{transcript_path: $transcript}')"
-  if invoke_state_helper kimi_hook_is_subagent_context "$input" "$output"; then return 1; fi
-  if invoke_state_helper kimi_hook_parent_session_id "$input" "$output"; then return 1; fi
-  [ ! -s "$output" ]
-}
 
 write_kimi_main_wire() {
   local path="$1"
@@ -1767,15 +1634,6 @@ write_main_transcript() {
 JSON
 }
 
-write_main_transcript_with_subagent_call() {
-  local path="$1"
-  mkdir -p "$(dirname "$path")" || return 1
-  cat >"$path" <<'JSON'
-{"timestamp":"2026-05-04T00:00:00.000Z","type":"session_meta","payload":{"id":"t00-session","source":"cli"}}
-{"timestamp":"2026-05-04T00:00:01.000Z","type":"user","message":{"content":"use a subagent"}}
-{"timestamp":"2026-05-04T00:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\"}"}}
-JSON
-}
 
 main_reviewer_transcript_path() {
   printf '%s/home/.kimi-code/sessions/kimi-hooks-test-main-reviewer.jsonl\n' "$TMP_ROOT"
@@ -1823,39 +1681,7 @@ file_lacks_values() {
   done
 }
 
-test_eci_gate_allows_spawned_agent_transcript_payload() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root eci-subagent-transcript)"
-  mkdir -p "$proof_root/t00-session"
-  printf 'scope: test\n' >"$proof_root/t00-session/eci_active"
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-  input="$TMP_ROOT/eci-subagent-transcript.json"
-  jq --arg transcript "$transcript" '.transcript_path = $transcript' "$FIXTURES/eci-apply-patch-code.json" >"$input"
-  out="$TMP_ROOT/eci-subagent-transcript.out"
 
-  run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-
-  expect_no_output "$out"
-}
-
-test_eci_gate_blocks_main_transcript_payload() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root eci-main-transcript)"
-  mkdir -p "$proof_root/t00-session"
-  printf 'scope: test\n' >"$proof_root/t00-session/eci_active"
-  transcript="$TMP_ROOT/home/.kimi-code/sessions/kimi-hooks-test-main.jsonl"
-  write_main_transcript "$transcript" || return 1
-  input="$TMP_ROOT/eci-main-transcript.json"
-  jq --arg transcript "$transcript" '.transcript_path = $transcript' "$FIXTURES/eci-apply-patch-code.json" >"$input"
-  out="$TMP_ROOT/eci-main-transcript.out"
-
-  run_hook "$out" "$ROOT/hooks/eci-active-gate.sh" "$input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-
-  is_pretool_deny "$out"
-}
 
 test_reviewer_backend_parser_accepts_no_credential_backends() {
   (
@@ -2161,13 +1987,13 @@ test_stop_reviewer_fail_open_for_unknown_backend() {
 }
 
 test_stop_reviewer_skips_spawned_subagent_transcript() {
-  local proof_root input out transcript body
+  local proof_root wire_dir wire input out body
   proof_root="$(fresh_proof_root stop-reviewer-subagent)"
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
   input="$TMP_ROOT/stop-reviewer-subagent.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" \
-    '.cwd = $cwd | .transcript_path = $transcript' "$FIXTURES/stop-basic.json" >"$input"
+  jq --arg cwd "$ROOT" '.cwd = $cwd' "$FIXTURES/stop-basic.json" >"$input"
   out="$TMP_ROOT/stop-reviewer-subagent.out"
   body="$TMP_ROOT/stop-reviewer-subagent-body.md"
 
@@ -2176,6 +2002,7 @@ test_stop_reviewer_skips_spawned_subagent_transcript() {
     KIMI_STOP_REVIEWER="ollama:http://127.0.0.1:11434:qwen3:4b" \
     KIMI_REVIEWER_DEBUG_BODY_PATH="$body" \
     KIMI_REVIEWER_FAKE_RESULT='{"assistant_tail_quote":"Done.","passes_completed":["tail","tools","checklist","agreements"],"verdict":"fail","violations":[{"rule":"Commit this session completed changes before stopping.","evidence":"Done."}]}' || return 1
+  rm -rf "$wire_dir" 2>/dev/null || true
 
   json_field_equals "$out" '.continue // false' "true" &&
     [ ! -e "$proof_root/t00-session" ] &&
@@ -2194,7 +2021,7 @@ test_stop_reviewer_timeout_and_hook_wiring() {
       | length == 1 and all(.timeout == 75)) and
     ([.hooks.PreToolUse[]? | select(.matcher == "^Bash$") | .hooks[]?.command] | any(test("/edit-bash-pre-reviewer\\.sh"))) and
     ([.hooks.PreToolUse[]? | select(.matcher == "^(Edit|Write)$") | .hooks[]?.command] | any(test("/edit-bash-pre-reviewer\\.sh")))
-  ' "$ROOT/hooks.json" >/dev/null || return 1
+  ' <(hooks_config_json) >/dev/null || return 1
   [ "$(bash -c '. "$1"; printf "%s" "$KIMI_EDIT_PRE_REVIEWER_TIMEOUT"' \
       bash "$ROOT/hooks/lib/reviewer-call.sh")" = 58 ]
 }
@@ -4719,10 +4546,13 @@ test_pre_reviewer_allows_after_prior_response_item_tool_call() {
 }
 
 test_pre_reviewer_skips_spawned_subagent_transcript() {
-  local proof_root input out transcript capture claim
+  local proof_root wire_dir wire input out transcript capture claim
   proof_root="$(fresh_proof_root pre-reviewer-subagent)"
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
+  transcript="$TMP_ROOT/home/.kimi-code/sessions/pre-reviewer-subagent-main.jsonl"
+  write_main_transcript "$transcript" || return 1
   submit_current_turn "$proof_root" pre-reviewer-subagent "SUBAGENT_PROMPT" pre-reviewer-subagent || return 1
   capture="$(turn_capture_path "$proof_root" pre-reviewer-subagent)" || return 1
   claim="$(turn_claim_path "$proof_root" pre-reviewer-subagent)" || return 1
@@ -4734,6 +4564,7 @@ test_pre_reviewer_skips_spawned_subagent_transcript() {
     HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" \
     KIMI_EDIT_PRE_REVIEWER="ollama:http://127.0.0.1:11434:qwen3:4b" \
     KIMI_PRE_REVIEWER_FAKE_RESULT='{"verdict":"deny","reason":"Load the matching skill first."}' || return 1
+  rm -rf "$wire_dir" 2>/dev/null || true
 
   expect_no_output "$out" && [ -f "$capture" ] && [ ! -e "$claim" ]
 }
@@ -4831,7 +4662,7 @@ eci_gate_matcher() {
       | .matcher
       | strings
     ] | join("|")
-  ' "$ROOT/hooks.json"
+  ' <(hooks_config_json)
 }
 
 matcher_has_tool() {
@@ -4984,20 +4815,6 @@ test_validate_edit_write_allows_edit_same_sid_proof() {
   expect_no_output "$out"
 }
 
-test_validate_edit_write_allows_aliased_proof_dir() {
-  local proof_root input out alias_dir
-  proof_root="$(fresh_proof_root edit-write-alias)"
-  alias_dir="$proof_root/mission-alias"
-  mkdir -p "$alias_dir"
-  printf 'session_id: t00-session\n' >"$alias_dir/.kimi-proof-alias"
-  input="$TMP_ROOT/edit-write-alias.json"
-  jq -n --arg fp "$alias_dir/project-understanding.md" \
-    '{session_id:"t00-session",tool_name:"Write",tool_input:{file_path:$fp,content:"x"}}' >"$input"
-  out="$TMP_ROOT/edit-write-alias.out"
-
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$input" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out"
-}
 
 test_validate_edit_write_blocks_edit_other_sid_proof() {
   local proof_root input out
@@ -5013,22 +4830,6 @@ test_validate_edit_write_blocks_edit_other_sid_proof() {
     json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason // empty' "other-session"
 }
 
-test_validate_apply_patch_allows_aliased_proof_dir() {
-  local proof_root input out alias_dir patch_path patch_text
-  proof_root="$(fresh_proof_root apply-patch-alias)"
-  alias_dir="$proof_root/mission-alias"
-  mkdir -p "$alias_dir"
-  printf 'session_id: t00-session\n' >"$alias_dir/.kimi-proof-alias"
-  patch_path="$alias_dir/project-understanding.md"
-  patch_text="$(printf '*** Begin Patch\n*** Add File: %s\n+test\n*** End Patch\n' "$patch_path")"
-  input="$TMP_ROOT/apply-patch-alias.json"
-  jq -n --arg patch "$patch_text" \
-    '{session_id:"t00-session",tool_name:"apply_patch",tool_input:{patch:$patch}}' >"$input"
-  out="$TMP_ROOT/apply-patch-alias.out"
-
-  run_hook "$out" "$ROOT/hooks/validate-apply-patch.sh" "$input" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out"
-}
 
 test_validate_apply_patch_blocks_other_sid_proof() {
   local proof_root input out patch_path patch_text
@@ -5046,23 +4847,6 @@ test_validate_apply_patch_blocks_other_sid_proof() {
     json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason // empty' "other-session"
 }
 
-test_validate_apply_patch_blocks_uuid_sid_despite_alias_marker() {
-  local proof_root input out uuid_dir patch_path patch_text
-  proof_root="$(fresh_proof_root apply-patch-uuid-alias)"
-  uuid_dir="$proof_root/019e55e6-6d85-7181-b197-43aa5708609b"
-  mkdir -p "$uuid_dir"
-  printf 'session_id: t00-session\n' >"$uuid_dir/.kimi-proof-alias"
-  patch_path="$uuid_dir/project-understanding.md"
-  patch_text="$(printf '*** Begin Patch\n*** Add File: %s\n+test\n*** End Patch\n' "$patch_path")"
-  input="$TMP_ROOT/apply-patch-uuid-alias.json"
-  jq -n --arg patch "$patch_text" \
-    '{session_id:"t00-session",tool_name:"apply_patch",tool_input:{patch:$patch}}' >"$input"
-  out="$TMP_ROOT/apply-patch-uuid-alias.out"
-
-  run_hook "$out" "$ROOT/hooks/validate-apply-patch.sh" "$input" KIMI_PROOF_ROOT="$proof_root" || return 1
-  is_pretool_deny "$out" &&
-    json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason // empty' "019e55e6-6d85-7181-b197-43aa5708609b"
-}
 
 ledger_basenames() {
   printf '%s\n' \
@@ -5072,10 +4856,11 @@ ledger_basenames() {
 }
 
 test_validate_bash_allows_subagent_low_level_work() {
-  local proof_root transcript repo input out command tag failures=0
+  local proof_root wire_dir wire repo input out command tag failures=0
   proof_root="$(fresh_proof_root bash-subagent-low-level)"
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
   repo="$(make_git_repo bash-subagent-low-level)" || return 1
   printf 'next\n' >"$repo/file.txt"
 
@@ -5083,8 +4868,8 @@ test_validate_bash_allows_subagent_low_level_work() {
     [ -n "$tag" ] || continue
     input="$TMP_ROOT/bash-subagent-low-level-$tag.json"
     out="$TMP_ROOT/bash-subagent-low-level-$tag.out"
-    jq --arg cwd "$repo" --arg transcript "$transcript" --arg command "$command" \
-      '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript | .tool_input.command = $command' \
+    jq --arg cwd "$repo" --arg command "$command" \
+      '.session_id = "t00-session" | .cwd = $cwd | .tool_input.command = $command' \
       "$FIXTURES/pre-reviewer-bash.json" >"$input" || return 1
 
     run_hook "$out" "$ROOT/hooks/validate-bash.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
@@ -5099,6 +4884,7 @@ rg	rg -n ledger_basenames $ROOT/hooks/tests/run.sh
 git-commit	git add file.txt && git commit -m low-level-work
 EOF
 
+  rm -rf "$wire_dir" 2>/dev/null || true
   [ "$failures" -eq 0 ]
 }
 
@@ -5131,20 +4917,21 @@ write_apply_patch_input() {
 }
 
 test_validate_direct_and_apply_block_subagent_ledger_paths() {
-  local proof_root ledger_dir transcript ledger tool input out tag
+  local proof_root ledger_dir wire_dir wire ledger tool input out tag
   proof_root="$(fresh_proof_root direct-subagent-ledger)"
   ledger_dir="$proof_root/t00-session"
   mkdir -p "$ledger_dir" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
 
   while IFS= read -r ledger; do
     for tool in Edit Write; do
       tag="direct-subagent-ledger-${tool}-${ledger//[^A-Za-z0-9]/-}"
       input="$TMP_ROOT/$tag.json"
       write_direct_ledger_input "$tool" "$ledger" "$input" || return 1
-      jq --arg cwd "$ledger_dir" --arg transcript "$transcript" \
-        '.cwd = $cwd | .transcript_path = $transcript' "$input" >"$input.tmp" &&
+      jq --arg cwd "$ledger_dir" \
+        '.cwd = $cwd' "$input" >"$input.tmp" &&
         mv "$input.tmp" "$input" || return 1
       out="$TMP_ROOT/$tag.out"
 
@@ -5160,8 +4947,8 @@ test_validate_direct_and_apply_block_subagent_ledger_paths() {
     tag="apply-subagent-ledger-${ledger//[^A-Za-z0-9]/-}"
     input="$TMP_ROOT/$tag.json"
     write_apply_patch_input "$ledger" "$input" || return 1
-    jq --arg cwd "$ledger_dir" --arg transcript "$transcript" \
-      '.cwd = $cwd | .transcript_path = $transcript' "$input" >"$input.tmp" &&
+    jq --arg cwd "$ledger_dir" \
+      '.cwd = $cwd' "$input" >"$input.tmp" &&
       mv "$input.tmp" "$input" || return 1
     out="$TMP_ROOT/$tag.out"
 
@@ -5173,6 +4960,8 @@ test_validate_direct_and_apply_block_subagent_ledger_paths() {
         return 1
       }
   done < <(ledger_basenames)
+
+  rm -rf "$wire_dir" 2>/dev/null || true
 }
 
 test_validate_direct_and_apply_allow_main_ledger_paths() {
@@ -5214,27 +5003,28 @@ test_validate_direct_and_apply_allow_main_ledger_paths() {
   done < <(ledger_basenames)
 }
 
-test_validate_direct_and_apply_allow_subagent_non_ledger_parent_proof_paths() {
-  local proof_root parent_dir transcript tool input out tag proof_path
+test_validate_direct_and_apply_block_subagent_cross_session_proof_paths() {
+  local proof_root parent_dir wire_dir wire tool input out tag proof_path
   proof_root="$(fresh_proof_root direct-subagent-parent-proof)"
   parent_dir="$proof_root/parent-session"
   mkdir -p "$parent_dir" || return 1
   proof_path="$parent_dir/proof.md"
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
 
   for tool in Edit Write; do
     tag="direct-subagent-parent-proof-$tool"
     input="$TMP_ROOT/$tag.json"
     write_direct_ledger_input "$tool" "$proof_path" "$input" || return 1
-    jq --arg cwd "$ROOT" --arg transcript "$transcript" \
-      '.cwd = $cwd | .transcript_path = $transcript' "$input" >"$input.tmp" &&
+    jq --arg cwd "$ROOT" \
+      '.cwd = $cwd' "$input" >"$input.tmp" &&
       mv "$input.tmp" "$input" || return 1
     out="$TMP_ROOT/$tag.out"
 
     run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-    expect_no_output "$out" || {
-      printf '%s\n' "$tag expected no denial" >&2
+    is_pretool_deny "$out" || {
+      printf '%s\n' "$tag expected cross-session denial" >&2
       cat "$out" >&2
       return 1
     }
@@ -5242,13 +5032,14 @@ test_validate_direct_and_apply_allow_subagent_non_ledger_parent_proof_paths() {
 
   input="$TMP_ROOT/apply-subagent-parent-proof.json"
   write_apply_patch_input "$proof_path" "$input" || return 1
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" \
-    '.cwd = $cwd | .transcript_path = $transcript' "$input" >"$input.tmp" &&
+  jq --arg cwd "$ROOT" \
+    '.cwd = $cwd' "$input" >"$input.tmp" &&
     mv "$input.tmp" "$input" || return 1
   out="$TMP_ROOT/apply-subagent-parent-proof.out"
 
   run_hook "$out" "$ROOT/hooks/validate-apply-patch.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out"
+  rm -rf "$wire_dir" 2>/dev/null || true
+  is_pretool_deny "$out"
 }
 
 test_validate_bash_allows_write_into_submodule() {
@@ -5336,7 +5127,7 @@ test_edit_write_hook_config_is_split_and_preserves_gates() {
         has($direct; "/eci-active-gate.sh") and
         has($direct; "/ate-orchestrator-gate.sh") and
         has($direct; "/edit-bash-pre-reviewer.sh"))
-  ' "$ROOT/hooks.json" >/dev/null
+  ' <(hooks_config_json) >/dev/null
 }
 
 test_ate_gate_denies_markdown_edits_for_lead() {
@@ -5451,17 +5242,19 @@ test_validate_bash_marks_redirected_read_shell_activity() {
 }
 
 test_validate_bash_blocks_subagent_eci_active_off() {
-  local input out transcript command
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
+  local input out wire_dir wire command
+  wire_dir="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session"
+  wire="$wire_dir/agents/main/wire.jsonl"
+  write_kimi_main_wire "$wire" Agent no 5000 || return 1
   command="~/.kimi-code/bin/eci-active off /tmp/eci-disengage.md"
   input="$TMP_ROOT/bash-subagent-eci-off.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" --arg command "$command" \
-    '.cwd = $cwd | .transcript_path = $transcript | .tool_input.command = $command' \
+  jq --arg cwd "$ROOT" --arg command "$command" \
+    '.cwd = $cwd | .tool_input.command = $command' \
     "$FIXTURES/pre-reviewer-bash.json" >"$input"
   out="$TMP_ROOT/bash-subagent-eci-off.out"
 
   run_hook "$out" "$ROOT/hooks/validate-bash.sh" "$input" HOME="$TMP_ROOT/home" || return 1
+  rm -rf "$wire_dir" 2>/dev/null || true
   is_pretool_deny "$out" &&
     json_field_contains "$out" '.hookSpecificOutput.permissionDecisionReason // empty' "Only the main thread"
 }
@@ -5919,24 +5712,6 @@ test_stop_gate_blocks_activity_marker() {
     grep -q "Do not rerun automated git checks" "$proof_root/t00-session/instructions.md"
 }
 
-test_stop_gate_blocks_parent_subagent_tool_call() {
-  local proof_root input out transcript repo
-  proof_root="$(fresh_proof_root stop-parent-subagent-tool)"
-  repo="$(make_git_repo stop-parent-subagent-tool)" || return 1
-  transcript="$TMP_ROOT/home/.kimi-code/sessions/kimi-hooks-test-main-subagent-tool.jsonl"
-  write_main_transcript_with_subagent_call "$transcript" || return 1
-  input="$TMP_ROOT/stop-parent-subagent-tool.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" '.cwd = $cwd | .transcript_path = $transcript' "$FIXTURES/stop-basic.json" >"$input"
-  out="$TMP_ROOT/stop-parent-subagent-tool.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  is_stop_block "$out" &&
-    json_field_contains "$out" '.reason // empty' "Automated stop checks passed" &&
-    json_field_not_contains "$out" '.reason // empty' "write " &&
-    [ -s "$proof_root/t00-session/instructions.md" ] &&
-    grep -q "Git state: clean" "$proof_root/t00-session/instructions.md" &&
-    grep -q "Do not rerun automated git checks" "$proof_root/t00-session/instructions.md"
-}
 
 test_stop_gate_reports_automated_git_checks_for_dirty_state() {
   local proof_root input out repo
@@ -6541,7 +6316,7 @@ test_stop_gate_skips_invalid_session_before_legacy_eci_state() {
 }
 
 test_stop_gate_matches_eci_marker_decision_table() {
-  local valid subagent own parent legacy name proof_root sid transcript input out expected repo
+  local valid subagent own parent legacy name proof_root sid input out expected repo
 
   for valid in true false; do
     for subagent in true false; do
@@ -6577,16 +6352,16 @@ test_stop_gate_matches_eci_marker_decision_table() {
               } >"$proof_root/pre-reviewer/eci_active"
             fi
 
-            transcript="$TMP_ROOT/home/.kimi-code/sessions/$name.jsonl"
+            wire="$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session/agents/main/wire.jsonl"
             if [ "$subagent" = true ]; then
-              write_subagent_transcript "$transcript" || return 1
+              write_kimi_main_wire "$wire" Agent no 5000 || return 1
             else
-              write_main_transcript "$transcript" || return 1
+              write_kimi_main_wire "$wire" Agent yes || return 1
             fi
 
             input="$TMP_ROOT/$name.json"
-            jq --arg sid "$sid" --arg cwd "$repo" --arg transcript "$transcript" \
-              '.session_id = $sid | .cwd = $cwd | .transcript_path = $transcript' \
+            jq --arg sid "$sid" --arg cwd "$repo" \
+              '.session_id = $sid | .cwd = $cwd' \
               "$FIXTURES/stop-basic.json" >"$input"
             out="$TMP_ROOT/$name.out"
 
@@ -6645,6 +6420,8 @@ test_stop_gate_matches_eci_marker_decision_table() {
       done
     done
   done
+
+  rm -rf "$TMP_ROOT/home/.kimi-code/sessions/wd_probe_0000000000000000/t00-session" 2>/dev/null || true
 }
 
 test_stop_gate_blocks_kimi_role_spoof_with_eci_state() {
@@ -6662,252 +6439,14 @@ test_stop_gate_blocks_kimi_role_spoof_with_eci_state() {
     json_field_contains "$out" '.reason // empty' "ECI is active"
 }
 
-test_stop_gate_blocks_spawned_agent_transcript_with_own_eci_state() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root stop-subagent-transcript)"
-  out="$TMP_ROOT/stop-subagent-transcript-eci-active.out"
-  KIMI_SESSION_ID=t00-session KIMI_PROOF_ROOT="$proof_root" "$ROOT/bin/eci-active" on "test scope" >"$out" 2>"$out.err" || return 1
 
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-  input="$TMP_ROOT/stop-subagent-transcript.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" '.cwd = $cwd | .transcript_path = $transcript' "$FIXTURES/stop-basic.json" >"$input"
-  out="$TMP_ROOT/stop-subagent-transcript.out"
 
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  is_stop_block "$out" &&
-    json_field_contains "$out" '.reason // empty' "ECI is active" &&
-    [ -e "$proof_root/t00-session/eci_active" ]
-}
 
-test_stop_gate_allows_spawned_agent_transcript_with_legacy_parent_eci_state() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root stop-subagent-legacy-parent-eci)"
-  mkdir -p "$proof_root/pre-reviewer" || return 1
-  {
-    printf 'scope: legacy parent test\n'
-    printf 'cwd: %s\n' "$ROOT"
-    printf 'session_id: pre-reviewer\n'
-  } >"$proof_root/pre-reviewer/eci_active"
 
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-  input="$TMP_ROOT/stop-subagent-legacy-parent-eci.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" \
-    '.cwd = $cwd | .transcript_path = $transcript' "$FIXTURES/stop-basic.json" >"$input"
-  out="$TMP_ROOT/stop-subagent-legacy-parent-eci.out"
 
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true"
-}
 
-test_stop_gate_allows_spawned_agent_transcript_when_input_session_is_parent_eci() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root stop-subagent-input-parent-eci)"
-  KIMI_SESSION_ID=parent-session KIMI_PROOF_ROOT="$proof_root" "$ROOT/bin/eci-active" on "parent ECI" >"$TMP_ROOT/stop-subagent-input-parent-eci-on.out" 2>"$TMP_ROOT/stop-subagent-input-parent-eci-on.err" || return 1
 
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-  input="$TMP_ROOT/stop-subagent-input-parent-eci.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" \
-    '.session_id = "parent-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$input"
-  out="$TMP_ROOT/stop-subagent-input-parent-eci.out"
 
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true"
-}
-
-test_stop_gate_blocks_subagent_touched_repo_changes() {
-  local proof_root repo transcript touch_input stop_input out marker_count reminder
-  proof_root="$(fresh_proof_root stop-subagent-touched-change)"
-  repo="$(make_git_repo stop-subagent-touched-change)" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-
-  touch_input="$TMP_ROOT/subagent-touch-edit.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript |
-     .tool_input.file_path = "file.txt"' \
-    "$FIXTURES/validate-edit-write-allow-unrelated-edit.json" >"$touch_input"
-  out="$TMP_ROOT/subagent-touch-edit.out"
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$touch_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out" || return 1
-
-  printf 'touched\n' >>"$repo/file.txt"
-  stop_input="$TMP_ROOT/stop-subagent-touched-change.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$stop_input"
-  out="$TMP_ROOT/stop-subagent-touched-change.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$stop_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  marker_count="$(find "$proof_root/touched-repos/sessions/t00-session" -type f 2>/dev/null | wc -l)"
-  reminder="$proof_root/t00-session/subagent-commit-reminder.md"
-  is_stop_block "$out" &&
-    [ "$marker_count" -eq 1 ] &&
-    [ -s "$reminder" ] &&
-    json_field_contains "$out" '.reason // empty' "commit only owned completed dirty paths" &&
-    json_field_contains "$out" '.reason // empty' "skip-stop on" &&
-    grep -q "Do not commit unrelated dirty files" "$reminder" &&
-    grep -q "KIMI_SESSION_ID=t00-session ~/.kimi-code/bin/skip-stop on" "$reminder" &&
-    grep -q "file.txt" "$reminder"
-}
-
-test_stop_gate_ignores_subagent_unrelated_dirty_file() {
-  local proof_root repo transcript touch_input stop_input out marker_count
-  proof_root="$(fresh_proof_root stop-subagent-unrelated-dirty)"
-  repo="$(make_git_repo stop-subagent-unrelated-dirty)" || return 1
-  printf 'other\n' >"$repo/other.txt"
-  git -C "$repo" add other.txt || return 1
-  git -C "$repo" commit -qm "add other file" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-
-  touch_input="$TMP_ROOT/subagent-unrelated-dirty-edit.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript |
-     .tool_input.file_path = "file.txt"' \
-    "$FIXTURES/validate-edit-write-allow-unrelated-edit.json" >"$touch_input"
-  out="$TMP_ROOT/subagent-unrelated-dirty-edit.out"
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$touch_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out" || return 1
-  marker_count="$(find "$proof_root/touched-repos/sessions/t00-session" -type f 2>/dev/null | wc -l)"
-  [ "$marker_count" -eq 1 ] || return 1
-
-  printf 'dirty\n' >>"$repo/other.txt"
-  stop_input="$TMP_ROOT/stop-subagent-unrelated-dirty.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$stop_input"
-  out="$TMP_ROOT/stop-subagent-unrelated-dirty.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$stop_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true" &&
-    [ ! -e "$proof_root/t00-session/subagent-commit-reminder.md" ]
-}
-
-test_stop_gate_ignores_subagent_preexisting_dirty_at_first_touch() {
-  local proof_root repo transcript touch_input stop_input out marker_count
-  proof_root="$(fresh_proof_root stop-subagent-preexisting-dirty)"
-  repo="$(make_git_repo stop-subagent-preexisting-dirty)" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-  printf 'preexisting\n' >>"$repo/file.txt"
-
-  touch_input="$TMP_ROOT/subagent-preexisting-edit.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript |
-     .tool_input.file_path = "."' \
-    "$FIXTURES/validate-edit-write-allow-unrelated-edit.json" >"$touch_input"
-  out="$TMP_ROOT/subagent-preexisting-edit.out"
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$touch_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out" || return 1
-  marker_count="$(find "$proof_root/touched-repos/sessions/t00-session" -type f 2>/dev/null | wc -l)"
-  [ "$marker_count" -eq 1 ] || return 1
-
-  stop_input="$TMP_ROOT/stop-subagent-preexisting-dirty.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$stop_input"
-  out="$TMP_ROOT/stop-subagent-preexisting-dirty.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$stop_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true" &&
-    [ ! -e "$proof_root/t00-session/subagent-commit-reminder.md" ]
-}
-
-test_stop_gate_allows_subagent_skip_marker() {
-  local proof_root repo transcript touch_input stop_input out marker_count
-  proof_root="$(fresh_proof_root stop-subagent-skip-marker)"
-  repo="$(make_git_repo stop-subagent-skip-marker)" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-
-  touch_input="$TMP_ROOT/subagent-skip-marker-edit.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript |
-     .tool_input.file_path = "file.txt"' \
-    "$FIXTURES/validate-edit-write-allow-unrelated-edit.json" >"$touch_input"
-  out="$TMP_ROOT/subagent-skip-marker-edit.out"
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$touch_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out" || return 1
-  marker_count="$(find "$proof_root/touched-repos/sessions/t00-session" -type f 2>/dev/null | wc -l)"
-  [ "$marker_count" -eq 1 ] || return 1
-
-  printf 'dirty\n' >>"$repo/file.txt"
-  KIMI_SESSION_ID=t00-session KIMI_PROOF_ROOT="$proof_root" "$ROOT/bin/skip-stop" on \
-    >"$TMP_ROOT/subagent-skip-marker-on.out" 2>&1 || return 1
-
-  stop_input="$TMP_ROOT/stop-subagent-skip-marker.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$stop_input"
-  out="$TMP_ROOT/stop-subagent-skip-marker.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$stop_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true" &&
-    [ ! -e "$proof_root/t00-session/subagent-commit-reminder.md" ]
-}
-
-test_stop_gate_allows_subagent_committed_clean_repo() {
-  local proof_root repo transcript touch_input stop_input out marker_count
-  proof_root="$(fresh_proof_root stop-subagent-committed-clean)"
-  repo="$(make_git_repo stop-subagent-committed-clean)" || return 1
-  transcript="$(subagent_transcript_path)"
-  write_subagent_transcript "$transcript" || return 1
-
-  touch_input="$TMP_ROOT/subagent-committed-clean-edit.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript |
-     .tool_input.file_path = "file.txt"' \
-    "$FIXTURES/validate-edit-write-allow-unrelated-edit.json" >"$touch_input"
-  out="$TMP_ROOT/subagent-committed-clean-edit.out"
-  run_hook "$out" "$ROOT/hooks/validate-edit-write.sh" "$touch_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  expect_no_output "$out" || return 1
-  marker_count="$(find "$proof_root/touched-repos/sessions/t00-session" -type f 2>/dev/null | wc -l)"
-  [ "$marker_count" -eq 1 ] || return 1
-
-  printf 'committed\n' >>"$repo/file.txt"
-  git -C "$repo" add file.txt || return 1
-  git -C "$repo" commit -qm "subagent committed change" || return 1
-  stop_input="$TMP_ROOT/stop-subagent-committed-clean.json"
-  jq --arg cwd "$repo" --arg transcript "$transcript" \
-    '.session_id = "t00-session" | .cwd = $cwd | .transcript_path = $transcript' \
-    "$FIXTURES/stop-basic.json" >"$stop_input"
-  out="$TMP_ROOT/stop-subagent-committed-clean.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$stop_input" \
-    HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  json_field_equals "$out" '.continue // false' "true" &&
-    [ ! -e "$proof_root/t00-session/subagent-commit-reminder.md" ]
-}
-
-test_stop_gate_blocks_main_transcript_with_eci_state() {
-  local proof_root input out transcript
-  proof_root="$(fresh_proof_root stop-main-transcript)"
-  out="$TMP_ROOT/stop-main-transcript-eci-active.out"
-  KIMI_SESSION_ID=t00-session KIMI_PROOF_ROOT="$proof_root" "$ROOT/bin/eci-active" on "test scope" >"$out" 2>"$out.err" || return 1
-
-  transcript="$TMP_ROOT/home/.kimi-code/sessions/kimi-hooks-test-main.jsonl"
-  write_main_transcript "$transcript" || return 1
-  input="$TMP_ROOT/stop-main-transcript.json"
-  jq --arg cwd "$ROOT" --arg transcript "$transcript" '.cwd = $cwd | .transcript_path = $transcript' "$FIXTURES/stop-basic.json" >"$input"
-  out="$TMP_ROOT/stop-main-transcript.out"
-
-  run_hook "$out" "$ROOT/hooks/stop-gate.sh" "$input" HOME="$TMP_ROOT/home" KIMI_PROOF_ROOT="$proof_root" || return 1
-  is_stop_block "$out" &&
-    json_field_contains "$out" '.reason // empty' "ECI is active"
-}
 
 test_stop_gate_allows_session_skip_state() {
   local proof_root input out
@@ -7600,8 +7139,8 @@ run_case "prompt state leaves Express routing rule prompt silent" \
   test_prompt_state_leaves_express_routing_rule_prompt_silent
 run_case "prompt state leaves Rust config silent" \
   test_prompt_state_leaves_rust_config_silent
-run_case "prompt state leaves web app hooks.json silent" \
-  test_prompt_state_leaves_web_app_hooks_json_silent
+run_case "prompt state leaves web app config silent" \
+  test_prompt_state_leaves_web_app_config_silent
 run_case "prompt state leaves caveman story silent" \
   test_prompt_state_leaves_caveman_story_silent
 run_case "runtime hook probe historical evidence is sanitized" \
@@ -7628,14 +7167,6 @@ run_case "ECI gate blocks code file edit from session marker" \
   test_eci_gate_blocks_code_file_edit_from_session_state
 run_case "ECI gate blocks KIMI_ROLE spoof through marker" \
   test_eci_gate_blocks_kimi_role_spoof
-run_case "subagent helper rejects oversize first record" \
-  test_subagent_helper_rejects_oversize_first_record
-run_case "parent helper rejects oversize first record" \
-  test_parent_helper_rejects_oversize_first_record
-run_case "first-record helpers reject oversize record without final newline" \
-  test_first_record_helpers_reject_oversize_without_final_newline
-run_case "first-record helpers preserve boundary behavior" \
-  test_first_record_helpers_preserve_boundary_behavior
 run_case "subagent helper detects kimi open agent call" \
   test_subagent_helper_kimi_open_agent_call
 run_case "subagent helper kimi main-context variants fail closed" \
@@ -7686,10 +7217,6 @@ run_case "stop gate kimi open call age bounds stop" \
   test_stop_gate_kimi_open_call_age_bounds_stop
 run_case "stop gate kimi subagent stop never exempted" \
   test_stop_gate_kimi_subagent_stop_never_exempted
-run_case "ECI gate allows spawned-agent transcript payload" \
-  test_eci_gate_allows_spawned_agent_transcript_payload
-run_case "ECI gate blocks main transcript payload" \
-  test_eci_gate_blocks_main_transcript_payload
 run_case "reviewer backend parser accepts no-credential backends" \
   test_reviewer_backend_parser_accepts_no_credential_backends
 run_case "reviewer backend parser rejects credential backends" \
@@ -7920,11 +7447,11 @@ run_case "ECI gate denies code Edit payload" \
   test_eci_gate_denies_code_edit_payload
 run_case "ECI gate blocks Edit JSON stdin when marker exists" \
   test_eci_gate_blocks_edit_stdin
-run_case "hooks.json edit matcher includes Edit" \
+run_case "config hooks edit matcher includes Edit" \
   test_edit_hook_config_is_wired
-run_case "hooks.json edit matcher includes Write" \
+run_case "config hooks edit matcher includes Write" \
   test_write_hook_config_is_wired
-run_case "hooks.json wires direct edit validators while preserving gates" \
+run_case "config hooks wire direct edit validators while preserving gates" \
   test_edit_write_hook_config_is_split_and_preserves_gates
 run_case "ATE gate denies markdown edits for lead role" \
   test_ate_gate_denies_markdown_edits_for_lead
@@ -7958,24 +7485,18 @@ run_case "validate-edit-write allows edits in a regular non-submodule repo" \
   test_validate_edit_write_allows_regular_repo_edit
 run_case "validate-edit-write allows Edit on own proof dir" \
   test_validate_edit_write_allows_edit_same_sid_proof
-run_case "validate-edit-write allows aliased proof dir" \
-  test_validate_edit_write_allows_aliased_proof_dir
 run_case "validate-edit-write blocks Edit on another session proof dir" \
   test_validate_edit_write_blocks_edit_other_sid_proof
-run_case "validate-apply-patch allows aliased proof dir" \
-  test_validate_apply_patch_allows_aliased_proof_dir
 run_case "validate-apply-patch blocks edits to another session proof dir" \
   test_validate_apply_patch_blocks_other_sid_proof
-run_case "validate-apply-patch blocks UUID proof dir despite alias marker" \
-  test_validate_apply_patch_blocks_uuid_sid_despite_alias_marker
 run_case "validate-bash allows subagent low-level work" \
   test_validate_bash_allows_subagent_low_level_work
 run_case "validate direct/apply blocks subagent ledger paths" \
   test_validate_direct_and_apply_block_subagent_ledger_paths
 run_case "validate direct/apply allows main-thread ledger paths" \
   test_validate_direct_and_apply_allow_main_ledger_paths
-run_case "validate direct/apply allows subagent non-ledger parent proof paths" \
-  test_validate_direct_and_apply_allow_subagent_non_ledger_parent_proof_paths
+run_case "validate direct/apply blocks subagent cross-session proof paths" \
+  test_validate_direct_and_apply_block_subagent_cross_session_proof_paths
 run_case "validate-bash allows writes into a git submodule" \
   test_validate_bash_allows_write_into_submodule
 run_case "validate-edit-write blocks direct Edit go.mod local replace" \
@@ -8106,8 +7627,6 @@ run_case "stop gate continues clean inactive turn" \
   test_stop_gate_continues_clean_inactive_turn
 run_case "stop gate blocks activity marker" \
   test_stop_gate_blocks_activity_marker
-run_case "stop gate blocks parent subagent tool call" \
-  test_stop_gate_blocks_parent_subagent_tool_call
 run_case "stop gate reports automated git checks for dirty state" \
   test_stop_gate_reports_automated_git_checks_for_dirty_state
 run_case "stop gate reports automated git checks for committed state" \
@@ -8186,24 +7705,6 @@ run_case "stop gate blocks /side parent session with ECI state" \
   test_stop_gate_blocks_side_parent_session_with_eci_state
 run_case "stop gate blocks ephemeral threads with ECI state" \
   test_stop_gate_blocks_ephemeral_threads_with_eci_state
-run_case "stop gate blocks spawned-agent transcript with own ECI state" \
-  test_stop_gate_blocks_spawned_agent_transcript_with_own_eci_state
-run_case "stop gate allows spawned-agent transcript with legacy parent ECI state" \
-  test_stop_gate_allows_spawned_agent_transcript_with_legacy_parent_eci_state
-run_case "stop gate allows spawned-agent transcript when input session is parent ECI" \
-  test_stop_gate_allows_spawned_agent_transcript_when_input_session_is_parent_eci
-run_case "stop gate blocks subagent touched repo changes" \
-  test_stop_gate_blocks_subagent_touched_repo_changes
-run_case "stop gate ignores subagent unrelated dirty file" \
-  test_stop_gate_ignores_subagent_unrelated_dirty_file
-run_case "stop gate ignores subagent preexisting dirty at first touch" \
-  test_stop_gate_ignores_subagent_preexisting_dirty_at_first_touch
-run_case "stop gate allows subagent skip marker" \
-  test_stop_gate_allows_subagent_skip_marker
-run_case "stop gate allows subagent committed clean repo" \
-  test_stop_gate_allows_subagent_committed_clean_repo
-run_case "stop gate blocks main transcript with ECI state" \
-  test_stop_gate_blocks_main_transcript_with_eci_state
 run_case "stop gate allows session-scoped skip marker" \
   test_stop_gate_allows_session_skip_state
 run_case "stop gate allows cwd-scoped skip marker" \

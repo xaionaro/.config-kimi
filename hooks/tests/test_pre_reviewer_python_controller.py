@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tomllib
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLER = ROOT / "hooks" / "lib" / "edit_bash_pre_reviewer_controller.py"
 WRAPPER = ROOT / "hooks" / "edit-bash-pre-reviewer.sh"
-HOOKS_JSON = ROOT / "hooks.json"
+HOOKS_CONFIG = ROOT / "config.toml"
 REVIEWER_CALL = ROOT / "hooks/lib/reviewer-call.sh"
 BACKEND_TIMEOUT_MAX_SECONDS = 58
 CONTROLLER_TIMEOUT_SECONDS = 70
@@ -219,12 +220,12 @@ if calls != 1:
         self.assertEqual(result.stdout, b"")
 
     def test_named_timeout_layers_have_strict_ordering(self) -> None:
-        configuration = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+        configuration = tomllib.loads(HOOKS_CONFIG.read_text(encoding="utf-8"))
         configured = [
-            hook["timeout"]
-            for group in configuration["hooks"]["PreToolUse"]
-            for hook in group["hooks"]
-            if hook["command"].endswith("/edit-bash-pre-reviewer.sh\"'")
+            entry["timeout"]
+            for entry in configuration["hooks"]
+            if entry.get("event") == "PreToolUse"
+            and entry["command"].endswith("/edit-bash-pre-reviewer.sh\"'")
         ]
         reviewer_source = REVIEWER_CALL.read_text(encoding="utf-8")
         self.assertIn(

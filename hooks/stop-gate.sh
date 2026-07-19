@@ -11,7 +11,6 @@ kimi_install_fail_open_trap stop-gate
 
 input=$(cat)
 session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
-transcript_path=$(printf '%s' "$input" | jq -r 'if (.transcript_path? | type) == "string" then .transcript_path else "" end' 2>/dev/null || true)
 stop_active=$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || true)
 cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 [ -z "$cwd" ] && cwd="$PWD"
@@ -57,11 +56,6 @@ active_eci_marker_for_stop() {
   fi
 
   if kimi_valid_session_id "$session_id"; then
-    if [ "$is_subagent_context" = true ]; then
-      parent_session_id="$(kimi_hook_parent_session_id "$input" 2>/dev/null || true)"
-      [ "$session_id" = "$parent_session_id" ] && return 1
-    fi
-
     marker="$root/$session_id/eci_active"
     [ -f "$marker" ] && { printf '%s\n' "$marker"; return 0; }
 
@@ -126,11 +120,6 @@ esac
 if block_if_eci_active_for_stop; then
   exit 0
 fi
-
-# Kimi Stop payloads do not carry a legacy transcript_path. When it is
-# absent the transcript-derived signals below simply degrade to their
-# fail-safe defaults (no transcript activity, no subagent exemption) and the
-# gate keeps enforcing from persisted state instead of skipping outright.
 
 git_change_summary() {
   local repo="$1"
@@ -426,56 +415,6 @@ activity_marker_summary() {
   printf '%s\n' "$found"
 }
 
-transcript_has_activity_since_last_user() {
-  local transcript="$1"
-
-  [ -n "$transcript" ] && [ -f "$transcript" ] || return 1
-  jq -e -s '
-    def response_item_type($e):
-      $e.payload.type // $e.payload.item.type // "";
-    def content_of($e):
-      $e.message.content // $e.payload.message.content // $e.payload.item.content // $e.payload.content // "";
-    def event_role($e):
-      if $e.type == "user" then "user"
-      elif $e.type == "assistant" then "assistant"
-      elif $e.type == "response_item" then
-        if response_item_type($e) == "function_call" then "assistant"
-        elif response_item_type($e) == "function_call_output" then "tool_result"
-        else ($e.payload.role // $e.payload.item.role // "") end
-      elif $e.type == "message" then ($e.role // "")
-      else "" end;
-    def is_real_user($e):
-      event_role($e) == "user"
-      and ((content_of($e) | type) == "string")
-      and ((content_of($e) | test("^[[:space:]]*<(hook_prompt|subagent_notification|turn_aborted)"; "i")) | not)
-      and (($e.isMeta // $e.message.isMeta // false) | not);
-    def call_records($e):
-      if $e.type == "response_item" and response_item_type($e) == "function_call" then
-        [{
-          name: ($e.payload.name // $e.payload.item.name // ""),
-          arguments: (($e.payload.arguments // $e.payload.item.arguments // "") | tostring)
-        }]
-      else
-        (content_of($e) as $c
-        | if ($c | type) == "array" then
-          [$c[] | select(.type == "tool_use" or .type == "function_call")
-            | {name: (.name // ""), arguments: ((.input // .arguments // "") | tostring)}]
-        else [] end)
-      end;
-    def active_call($c):
-      (($c.name // "") | test("(^|\\.)(Edit|Write|spawn_agent|send_input|wait_agent|close_agent|resume_agent)$"))
-      or
-      (($c.name // "") == "multi_tool_use.parallel"
-        and (($c.arguments // "") | test("functions\\.(apply_patch|spawn_agent|send_input|wait_agent|close_agent|resume_agent)")));
-    . as $all
-    | ([ $all | to_entries[] | select(is_real_user(.value)) | .key ] | last // -1) as $last_user
-    | $last_user >= 0 and
-      ([ $all | to_entries[]
-        | select(.key > $last_user and event_role(.value) == "assistant")
-        | call_records(.value)[]
-        | select(active_call(.)) ] | length) > 0
-  ' "$transcript" >/dev/null 2>&1
-}
 
 if kimi_hook_is_subagent_context "$input"; then
   case "${KIMI_ROLE:-}" in
@@ -539,10 +478,6 @@ activity_summary="$(activity_marker_summary "$session_id" "$cwd")"
 change_summary="$(git_change_summary "$repo" "$baseline" || true)"
 changed=false
 [ -n "$change_summary" ] && changed=true
-transcript_activity=false
-if transcript_has_activity_since_last_user "$transcript_path"; then
-  transcript_activity=true
-fi
 repo_is_git=false
 if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   repo_is_git=true
@@ -599,8 +534,7 @@ fi
 # Early exit: if this session did no mutation work since the last user
 # message and no persisted indicators exist, skip the stop gate regardless of
 # pre-existing dirt from prior sessions.
-if [ "$transcript_activity" != "true" ] &&
-  [ ! -f "$proof" ] &&
+if [ ! -f "$proof" ] &&
   [ "$changed" != "true" ] &&
   [ -z "$task_active" ] &&
   [ -z "$activity_summary" ]; then
