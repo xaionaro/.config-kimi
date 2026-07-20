@@ -11,13 +11,28 @@ Phased agent team with adversarial review loops and tiered information trust.
 
 - Kimi selection starts this pipeline. Loading this skill alone does not.
 - Use standard `Agent` (with `subagent_type`), `Agent` with `resume`, and `TaskOutput` for role execution.
-- When waiting on teammates, call `TaskOutput` with `block: true` and `timeout: 900` (15 minutes). Do not use shorter polling or describe waits as "short polls".
+- When waiting on teammates, use foreground `Agent` when the next step depends on the result. Background independent work and accept its automatic terminal notification. `TaskOutput(block=false)` may take a status snapshot. `TaskOutput(block=true)` with `timeout` 0–3600 seconds is for explicit waiting only; after timeout, never block on that task again. Never sleep, poll, or tight-loop repeated waits.
+
+Note: ATE audit, stale-check, and recovery bounds are event-recovery mechanisms triggered by missing or abnormal events, not normal completion polling. They remain in force.
+
 - Map explorers/reviewers to `explore`; map executors/designers/verifiers to `coder`.
 - Spawn with reusable `subagent_type` roles only: `explore`, `coder`, `plan`. Team roles (`designer`, `executor`, `qa`) are stable roster labels, not custom `subagent_type`s. If the spawn schema lacks `subagent_type`, put the intended reusable type in the prompt/roster and record the limitation.
 - Give every worker explicit file/module ownership and warn that other agents may edit in parallel.
 - Every subagent prompt must include: "Follow any Stop-hook prompt in that session, including required proof/checklist files. Fix blockers within assigned scope. Report to the orchestrator only when resolution needs out-of-scope changes, unrelated user work, credentials, or approval."
 - If the main/orchestrator lacks standard agent tools, do not run this pipeline; hard-escalate instead of launching shell-based Kimi sessions.
 - If a teammate role lacks standard agent tools required by ATE but the main/orchestrator has them, use the Lead-Mediated Nested Delegation Adapter.
+- The orchestrator never launches or waits for a Codex shell process directly. Spawn a bounded `codex-runner` subagent (`coder` or `explore` type) that invokes Codex through `~/.kimi-code/bin/codex-with-rotation`. Wait with `TaskOutput(block=true)`. Raw `codex` invocation on the main thread is forbidden.
+
+## Root goal
+
+Before the first teammate spawn, call `GetGoal`.
+- No current goal: call `CreateGoal` with the root objective and completion criterion "QA approved the integrated root result; the user explicitly confirmed completion; ATE shutdown completed."
+- Matching active goal: reuse it.
+- Matching paused or blocked goal: call `UpdateGoal(status: "active")` only on explicit user resume.
+- Different current goal: use `CreateGoal(..., replace: true)` only after explicit user cancellation/replacement and ATE shutdown.
+- Nested ECI under ATE creates no separate goal.
+
+Call `UpdateGoal(status: "complete")` only after QA APPROVED + user confirms + shutdown. Call `UpdateGoal(status: "blocked")` at hard escalation with a user-owned blocker.
 
 **Core principle:** Explorers gather hard facts, designer architects from facts, executors aggregate implementation until root-task E2E passes, reviewers tear apart the integrated diff, QA validates the whole. Coordinator manages logistics, lead audits rule compliance. Neither implements.
 
@@ -365,6 +380,12 @@ Round = one REJECTED review pass (initial submission is not a round).
 - **10 rounds max** per root-task aggregate review. 11th REJECTED pass -> protocol-limit blocker: run BRP before user escalation. Counters reset on QA/Phase 2 re-entry.
 - **2 QA re-entries max** (total). 3rd -> escalate to user with: what failed, what was tried.
 - **2 designer-to-explorer rounds max.** Cap hit -> create a protocol-limit blocker record; run `blocker-resolution-protocol` before user escalation.
+
+### Goal anti-loop
+
+The active goal does not extend any ATE loop limit. Nested ECI retains its three-cycle and one-loop-breaker limits. For each genuine non-terminal impasse, record blocker fingerprint and consecutive blocked goal turns in the project ledger. Resume with `UpdateGoal(status: "active")` only after material user input.
+
+Hard escalation is the terminal case: three full cycles, loop-breaker, and BRP have all been exhausted. Call `UpdateGoal(status: "blocked")` at hard escalation — this IS the three-consecutive-turn threshold met.
 
 ### Crash Recovery
 

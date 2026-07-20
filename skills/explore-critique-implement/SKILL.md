@@ -27,6 +27,20 @@ Maintain a project-understanding ledger for every ECI run. Use the `maintaining-
 - A request to use ATE while ECI is active, or to cancel, withdraw, or replace ECI's root scope, is user closure for ECI teardown. Checkpoint unfinished work and record its successor handoff or scope removal before using `user-closed:`.
 - Claude `TeamCreate` / named Agent / `SendMessage` / `TeamDelete` maps to Kimi `Agent` (with `subagent_type`) / `Agent` with `resume` / `TaskOutput` / `TaskStop`.
 - Kimi ECI uses standard agent management tools only. Do not launch shell-wrapped Kimi agents. If the `Agent` tool or related agent tools are unavailable, ECI cannot run; hard-escalate to the user.
+- The orchestrator never launches or waits for a Codex shell process directly. Spawn a bounded `codex-runner` subagent (`coder` or `explore` type) that invokes Codex through `~/.kimi-code/bin/codex-with-rotation`. Wait with `TaskOutput(block=true)`. Raw `codex` invocation on the main thread is forbidden.
+
+## Root goal
+
+Before arming the edit gate, call `GetGoal`.
+- No current goal: call `CreateGoal` with the root objective and completion criterion "Every active root-scope requirement is satisfied; each in-scope change passed its ECI acceptance route; required commits and clean-pass teardown completed."
+- Matching active goal: reuse it without calling `UpdateGoal`.
+- Matching paused or blocked goal: call `UpdateGoal(status: "active")` only when the latest user instruction explicitly resumes that goal.
+- Different current goal: use `CreateGoal(..., replace: true)` only after explicit user cancellation/replacement and current workflow teardown.
+- Nested ECI under ATE uses the outer ATE goal and creates no goal.
+
+Call `UpdateGoal(status: "complete")` only after the completion criterion is true. Budget exhaustion, partial work, or user-closed teardown without a successor is not completion. Call `UpdateGoal(status: "blocked")` at hard escalation.
+
+Note: The `eci_active` marker file is currently used by `stop-gate.sh` for continuation enforcement. Full migration to goal-driven continuation requires updating hooks (`stop-gate.sh`, `prompt-task-reminder.sh`, `session-snapshot.sh`) — this is documented follow-up work. The rules above define the target behavior; until hooks are migrated, both mechanisms coexist.
 
 ## Prerequisites
 
@@ -159,7 +173,7 @@ Each iteration tackles one change. All four steps run per iteration. Do not adva
 
 Agent separation: see Red Flags. Main thread orchestrates; agents produce.
 
-Polling cadence: re-check a working agent at most every 30 minutes; faster polling produces no new signal and burns context. Use `TaskOutput` with `block=true` for waiting.
+**Completion-locked waiting.** Use foreground `Agent` when the next step depends on the result. Background independent work and accept its automatic terminal notification. `TaskOutput(block=false)` may take a status snapshot. Use `TaskOutput(block=true)` only when explicit waiting is required; its timeout range is 0–3600 seconds. After `retrieval_status: timeout`, never block on that task again — yield and accept the automatic notification. Never sleep, poll, or tight-loop repeated waits.
 
 ### Bug-discovery routing
 
@@ -409,6 +423,14 @@ Single decision table for all limit hits. One loop-breaker per change total.
 | Step 2 post-brainstormer all-REJECT | Brainstormer fired and new explorer's options still all-REJECT after one revision | Create protocol-limit blocker record -> run `blocker-resolution-protocol` -> hard escalate only if BRP finds no feasible internal path or the blocker is user-owned; ECI stays active | — |
 
 **Hard escalate** = report a blocker requiring user input while ECI remains active. Use the escalation report from `blocker-resolution-protocol`, plus: (a) original problem, (b) what each cycle tried, (c) loop-breaker's assessment (if invoked), (d) last blocking issue, (e) next-best alternative from explorer's ranking. Silent punts forbidden.
+
+### Goal anti-loop
+
+Goal continuation never resets or extends any workflow retry, gate, cycle, loop-breaker, or BRP limit. A goal continuation may try a materially different feasible path; it may not repeat a capped step or unchanged failed action.
+
+For each genuine non-terminal impasse, record in the project ledger: blocker fingerprint, consecutive blocked goal turns, evidence from the last attempted alternative, and what material change would reset the count.
+
+Hard escalation is the terminal case: three full cycles, loop-breaker, and BRP have all been exhausted. Call `UpdateGoal(status: "blocked")` at hard escalation — this IS the three-consecutive-turn threshold met.
 
 ## Iteration limit
 
