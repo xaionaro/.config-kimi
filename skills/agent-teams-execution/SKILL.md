@@ -385,6 +385,17 @@ Round = one REJECTED review pass (initial submission is not a round).
 
 The active goal does not extend any ATE loop limit. Nested ECI retains its three-cycle and one-loop-breaker limits. For each genuine non-terminal impasse, record blocker fingerprint and consecutive blocked goal turns in the project ledger. Resume with `UpdateGoal(status: "active")` only after material user input.
 
+Track blocked goal turns independently by exact task ID; activity on another task does not break that task's sequence. A blocked goal turn cannot advance because that task remains running. This rule counts goal-turn decisions, not `TaskOutput` calls, and authorizes no wait forbidden elsewhere. **Terminal output** explicitly reports that the task itself completed, failed, or was interrupted/cancelled. Timeout, silence, `running`, status-only data, an interrupted wait call, and partial output are non-terminal. Partial output may refresh activity evidence; it does not reset this counter.
+
+| Prior state | Event for that task ID | New state and required action |
+|---|---|---|
+| No entry | Blocked goal turn without terminal output | Set `count=1`; record the task ID. |
+| `count=1` | Later blocked goal turn without terminal output | Set `count=2`. |
+| `count=2` | Later blocked goal turn without terminal output | Set `count=3` and latch `no-more-blocking`. Stop blocking on that task. Advance independent work, or classify/recover it only under existing stale rules. |
+| Any count | Terminal output arrives | Clear the entry and route the terminal result. |
+
+`count=3` does not itself prove staleness or authorize cancellation. A replacement task has a new ID and remains outside this same-ID guard, subject to existing workflow limits.
+
 Hard escalation is the terminal case: three full cycles, loop-breaker, and BRP have all been exhausted. Call `UpdateGoal(status: "blocked")` at hard escalation — this IS the three-consecutive-turn threshold met.
 
 ### Crash Recovery
