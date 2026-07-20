@@ -1,0 +1,895 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+
+show_help() {
+  cat <<'EOF'
+Usage:
+  codex-with-rotation [--label <string>] -- [codex-exec-arguments ...]
+  codex-with-rotation --help
+
+Run `codex exec --ephemeral --json` in a disposable CODEX_HOME, rotating a
+fixed credential pool after recognized quota failures. Standard input is
+captured in full and supplied unchanged to every attempt. Arguments after `--`
+are passed literally to `codex exec` after `--ephemeral --json`.
+
+Options:
+  --label <string>  Wrapper-only caller label. It is accepted for routing
+                    compatibility, but is not forwarded and is not part of
+                    task_sig.
+  --help            Print this help and exit.
+
+State and locking:
+  State: ~/.codex/.auth-active       (JSON, mode 0600)
+  Lock:  ~/.codex/.auth-active.lock
+  Pool order:
+    ~/.codex/auth.json
+    ~/.codex/auth.json-danusya
+    ~/.codex/auth.json-xaionaro
+
+  CODEX_ROTATE_STATE_DIR replaces ~/.codex for state, lock, pool, config,
+  hooks, and plugins. It exists for isolated testing.
+
+Classification precedence (highest first):
+  1. local_hook_deny
+     - item.type == approval_denied
+     - item.type contains CommandExecutionApproval and the item says denied
+     - stderr contains: Command blocked by PreToolUse hook
+  2. cyber
+     - CyberPolicyResponse, cyber_policy, HighRiskCyberActivity,
+       high_risk_cyber_activity
+     - GuardianAssessmentEvent or guardian_assessment_event with a
+       decision_source or rationale containing deny, block, or reject
+  3. quota
+     - UsageLimitReached, usage_limit_reached, RateLimitReached,
+       rate_limit_reached, SessionBudgetExceeded, session_budget_exceeded,
+       QuotaExceeded, quota_exceeded, UsageNotIncluded, usage_not_included
+     - codex_error_http_status_code == 429
+  4. unknown (including malformed or unmatched failure output; fail closed)
+
+Exit codes:
+   0  Codex succeeded; captured JSONL is forwarded.
+   1  Generic invocation or argument failure.
+  70  Three-attempt launch budget exhausted.
+  71  Wrapper-internal failure or corrupt state.
+  72  Quota exhaustion: no non-cooling account remains.
+  73  Local-hook denial repeated for this invocation.
+  74  Rotation requested with fewer than two distinct account IDs.
+  75  Cyber escalation, or CODEX_KIMI_FORCE requested direct Kimi routing.
+  76  Unknown Codex failure; raw JSONL/stderr tails follow the status JSON.
+
+Codex's raw exit status never escapes. The true status is reported as
+`codex_exit` in the wrapper's stderr JSON.
+
+task_sig:
+  task_sig is 64 lowercase hexadecimal characters: SHA-256 of the exact byte
+  sequence produced by this definition, where stdin_spool contains full stdin
+  and "$@" is the literal pass-through argv after `--`:
+
+    printf '%s:' "$(wc -c <stdin_spool)" >> hash_input
+    cat stdin_spool >> hash_input
+    printf '_%s:' "$#" >> hash_input
+    printf '%s' "$@" >> hash_input
+    sha256sum hash_input | cut -c1-64
+
+Environment:
+  CODEX_KIMI_FORCE=1
+      Do not launch Codex. Emit class=force_kimi and exit 75 after state init.
+  CODEX_HOME
+      The child value is always replaced with a disposable private directory.
+      The caller's value does not select the credential pool.
+  CODEX_ROTATE_STATE_DIR
+      Test override for the state/source directory described above.
+
+Caveats:
+  - Live quota/cyber JSONL wire shapes are unverified; classification has only
+    synthetic-fixture coverage and unmatched output fails closed with exit 76.
+  - Capability markers are not cryptographically authenticated. They prevent
+    accidental quota use, not abuse by a hostile same-UID process.
+  - Exit codes 73-76 are wrapper-private. Never interpret one as a raw Codex
+    status.
+  - The disposable CODEX_HOME discards OAuth refresh writes. If a refresh token
+    expires, run `codex login` with a throwaway CODEX_HOME, then atomically
+    replace only the affected pool file while preserving its mode.
+  - Direct `codex exec` against ~/.codex is unsupported because it can write
+    credential state outside this wrapper's isolation boundary.
+  - Tested with codex-cli 0.144.6. Re-verify fixtures and live behavior after
+    upgrading Codex.
+
+Reseeding outline:
+  1. Create a mode-0700 throwaway directory under ~/tmp.
+  2. Run `CODEX_HOME=<throwaway> codex login`.
+  3. Copy its auth.json to an in-directory mode-0600 temporary file beside the
+     affected pool member, then rename the temporary file over that member.
+  4. Remove the throwaway directory. Never print or commit auth contents.
+EOF
+}
+
+emit_usage_failure() {
+  local message=$1
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"generic_failure","task_sig":null,"codex_exit":null}' >&2
+  printf '%s: %s\n' "$program" "$message" >&2
+  printf 'Try `%s --help` for usage.\n' "$program" >&2
+  exit 1
+}
+
+label=
+delimiter_seen=0
+codex_args=()
+
+while (($#)); do
+  case $1 in
+    --help)
+      show_help
+      exit 0
+      ;;
+    --label)
+      (($# >= 2)) || emit_usage_failure '--label requires a value'
+      label=$2
+      shift 2
+      ;;
+    --)
+      delimiter_seen=1
+      shift
+      codex_args=("$@")
+      break
+      ;;
+    *)
+      emit_usage_failure "unexpected wrapper argument: $1"
+      ;;
+  esac
+done
+
+((delimiter_seen == 1)) || emit_usage_failure 'missing required -- delimiter'
+
+umask 077
+tmp_base=${HOME:?HOME must be set}/tmp
+if ! mkdir -p -- "$tmp_base"; then
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"wrapper_failure","task_sig":null,"codex_exit":null}' >&2
+  exit 71
+fi
+
+run_tmp=$(mktemp -d "$tmp_base/codex-with-rotation.XXXXXX") || {
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"wrapper_failure","task_sig":null,"codex_exit":null}' >&2
+  exit 71
+}
+chmod 700 -- "$run_tmp" || {
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"wrapper_failure","task_sig":null,"codex_exit":null}' >&2
+  exit 71
+}
+
+cleanup() {
+  if [[ -n ${run_tmp:-} && $run_tmp == "$tmp_base"/codex-with-rotation.* ]]; then
+    rm -rf -- "$run_tmp"
+  fi
+}
+trap cleanup EXIT
+
+stdin_spool=$run_tmp/stdin
+if ! : >"$stdin_spool" || ! chmod 600 -- "$stdin_spool" || ! cat >"$stdin_spool"; then
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"wrapper_failure","task_sig":null,"codex_exit":null}' >&2
+  exit 71
+fi
+
+set +e
+python3 - "$run_tmp" "$stdin_spool" "${codex_args[@]}" <<'PY'
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, TypeAlias
+
+
+PROGRAM = "codex-with-rotation"
+STATE_VERSION = 1
+MAX_ATTEMPTS = 3
+COOLDOWN_SECONDS = 600
+CYBER_WINDOW_SECONDS = 600
+POOL_NAMES = ("auth.json", "auth.json-danusya", "auth.json-xaionaro")
+
+CYBER_VARIANTS = {
+    "cyberpolicyresponse",
+    "cyber_policy",
+    "highriskcyberactivity",
+    "high_risk_cyber_activity",
+}
+GUARDIAN_VARIANTS = {"guardianassessmentevent", "guardian_assessment_event"}
+QUOTA_VARIANTS = {
+    "usagelimitreached",
+    "usage_limit_reached",
+    "ratelimitreached",
+    "rate_limit_reached",
+    "sessionbudgetexceeded",
+    "session_budget_exceeded",
+    "quotaexceeded",
+    "quota_exceeded",
+    "usagenotincluded",
+    "usage_not_included",
+}
+DENIAL_WORDS = ("deny", "block", "reject")
+
+JsonObject: TypeAlias = dict[str, Any]
+
+
+class FailureClass(str, Enum):
+    LOCAL_HOOK_DENY = "local_hook_deny"
+    CYBER = "cyber"
+    QUOTA = "quota"
+    UNKNOWN = "unknown"
+
+
+class WrapperFailure(RuntimeError):
+    """An internal condition that must be remapped to wrapper exit 71."""
+
+
+@dataclass(frozen=True)
+class Classification:
+    failure_class: FailureClass
+    variant: str | None
+    has_failure_event: bool
+    has_malformed_line: bool
+
+
+def compact_json(payload: JsonObject) -> str:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=False)
+
+
+def emit_status(
+    failure_class: str,
+    task_sig: str | None,
+    codex_exit: int | None,
+    *,
+    variant: str | None = None,
+    attempts: int | None = None,
+) -> None:
+    payload: JsonObject = {
+        "wrapper": PROGRAM,
+        "class": failure_class,
+        "task_sig": task_sig,
+        "codex_exit": codex_exit,
+    }
+    if variant is not None:
+        payload["variant"] = variant
+    if attempts is not None:
+        payload["attempts"] = attempts
+    print(compact_json(payload), file=sys.stderr)
+
+
+def format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def parse_utc(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise WrapperFailure("invalid RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise WrapperFailure("invalid RFC3339 timestamp") from error
+    if parsed.tzinfo is None:
+        raise WrapperFailure("timestamp has no timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def atomic_write_state(state_path: Path, state_data: JsonObject) -> None:
+    temporary_fd = -1
+    temporary_name = ""
+    try:
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{state_path.name}.", dir=state_path.parent
+        )
+        os.fchmod(temporary_fd, 0o600)
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+            temporary_fd = -1
+            json.dump(state_data, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, state_path)
+        temporary_name = ""
+        directory_fd = os.open(state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise WrapperFailure("could not write state atomically") from error
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def state_lock(lock_path: Path, *, exclusive: bool) -> Iterator[None]:
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    except OSError as error:
+        raise WrapperFailure("could not acquire state lock") from error
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def account_id_from_auth(auth_path: Path) -> str:
+    try:
+        with auth_path.open("r", encoding="utf-8") as stream:
+            auth_document = json.load(stream)
+        account_id = auth_document["tokens"]["account_id"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise WrapperFailure(f"cannot read account_id from {auth_path}") from error
+    finally:
+        if "auth_document" in locals():
+            del auth_document
+    if not isinstance(account_id, str) or not account_id:
+        raise WrapperFailure(f"invalid account_id in {auth_path}")
+    return account_id
+
+
+def initial_state(pool_paths: tuple[Path, ...]) -> JsonObject:
+    pool: list[JsonObject] = []
+    seen_account_ids: set[str] = set()
+    for pool_path in pool_paths:
+        if not pool_path.exists():
+            continue
+        account_id = account_id_from_auth(pool_path)
+        if account_id in seen_account_ids:
+            continue
+        seen_account_ids.add(account_id)
+        pool.append({"account_id": account_id, "path": str(pool_path)})
+    if not pool:
+        raise WrapperFailure("credential pool is empty")
+    return {
+        "version": STATE_VERSION,
+        "active_account_id": pool[0]["account_id"],
+        "pool": pool,
+        "cooldowns": {},
+        "cyber_streaks": {
+            "global": {"count": 0, "last_observed_utc": None, "variant": None},
+            "tasks": {},
+        },
+    }
+
+
+def validate_state(state_path: Path, state_data: Any) -> JsonObject:
+    if not isinstance(state_data, dict) or state_data.get("version") != STATE_VERSION:
+        raise WrapperFailure("unsupported or corrupt state")
+    pool = state_data.get("pool")
+    if not isinstance(pool, list) or not pool:
+        raise WrapperFailure("state pool is empty or invalid")
+    seen: set[str] = set()
+    for entry in pool:
+        if not isinstance(entry, dict):
+            raise WrapperFailure("invalid pool entry")
+        account_id = entry.get("account_id")
+        path = entry.get("path")
+        if (
+            not isinstance(account_id, str)
+            or not account_id
+            or account_id in seen
+            or not isinstance(path, str)
+            or not path
+        ):
+            raise WrapperFailure("invalid or duplicate pool entry")
+        seen.add(account_id)
+    if state_data.get("active_account_id") not in seen:
+        raise WrapperFailure("active account is not in the pool")
+    if not isinstance(state_data.get("cooldowns"), dict):
+        raise WrapperFailure("invalid cooldown map")
+    streaks = state_data.get("cyber_streaks")
+    if not isinstance(streaks, dict) or not isinstance(streaks.get("tasks"), dict):
+        raise WrapperFailure("invalid cyber streak map")
+    try:
+        state_mode = stat.S_IMODE(state_path.stat().st_mode)
+    except OSError as error:
+        raise WrapperFailure("could not stat state file") from error
+    if state_mode != 0o600:
+        raise WrapperFailure("state file mode is not 0600")
+    return state_data
+
+
+def read_state_unlocked(state_path: Path) -> JsonObject:
+    try:
+        with state_path.open("r", encoding="utf-8") as stream:
+            state_data = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        raise WrapperFailure("could not parse state") from error
+    return validate_state(state_path, state_data)
+
+
+def initialize_state(
+    state_path: Path,
+    lock_path: Path,
+    pool_paths: tuple[Path, ...],
+) -> None:
+    with state_lock(lock_path, exclusive=True):
+        if not state_path.exists():
+            atomic_write_state(state_path, initial_state(pool_paths))
+        read_state_unlocked(state_path)
+
+
+def active_pool_entry(state_path: Path, lock_path: Path) -> JsonObject:
+    with state_lock(lock_path, exclusive=False):
+        state_data = read_state_unlocked(state_path)
+        active_id = state_data["active_account_id"]
+        for entry in state_data["pool"]:
+            if entry["account_id"] == active_id:
+                return dict(entry)
+    raise WrapperFailure("active account disappeared")
+
+
+def reset_cyber_streak(state_path: Path, lock_path: Path, task_sig: str) -> None:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        tasks = state_data["cyber_streaks"]["tasks"]
+        previous = tasks.get(task_sig)
+        if previous is None:
+            return
+        reset = {"count": 0, "last_observed_utc": None, "variant": None}
+        if previous != reset:
+            tasks[task_sig] = reset
+            atomic_write_state(state_path, state_data)
+
+
+def record_cyber_hit(
+    state_path: Path,
+    lock_path: Path,
+    task_sig: str,
+    variant: str,
+    observed: datetime,
+) -> int:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        tasks = state_data["cyber_streaks"]["tasks"]
+        previous = tasks.get(task_sig)
+        count = 1
+        if isinstance(previous, dict) and isinstance(previous.get("count"), int):
+            previous_time_raw = previous.get("last_observed_utc")
+            if previous["count"] > 0 and previous_time_raw is not None:
+                previous_time = parse_utc(previous_time_raw)
+                age = (observed - previous_time).total_seconds()
+                if 0 <= age <= CYBER_WINDOW_SECONDS:
+                    count = previous["count"] + 1
+        tasks[task_sig] = {
+            "count": count,
+            "last_observed_utc": format_utc(observed),
+            "variant": variant,
+        }
+        atomic_write_state(state_path, state_data)
+        return count
+
+
+def account_is_cooling(entry: Any, observed: datetime) -> bool:
+    if entry is None:
+        return False
+    if not isinstance(entry, dict) or "until_utc" not in entry:
+        raise WrapperFailure("invalid cooldown entry")
+    return parse_utc(entry["until_utc"]) > observed
+
+
+def rotate_after_quota(
+    state_path: Path,
+    lock_path: Path,
+    failed_account_id: str,
+    variant: str,
+    observed: datetime,
+) -> str:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        pool = state_data["pool"]
+        if len(pool) < 2:
+            return "insufficient_distinct"
+
+        state_data["cooldowns"][failed_account_id] = {
+            "until_utc": format_utc(observed + timedelta(seconds=COOLDOWN_SECONDS)),
+            "variant": variant,
+            "observed_utc": format_utc(observed),
+        }
+
+        if state_data["active_account_id"] != failed_account_id:
+            atomic_write_state(state_path, state_data)
+            return "changed_elsewhere"
+
+        failed_index = next(
+            (
+                index
+                for index, entry in enumerate(pool)
+                if entry["account_id"] == failed_account_id
+            ),
+            None,
+        )
+        if failed_index is None:
+            raise WrapperFailure("failed account is not in the pool")
+
+        for offset in range(1, len(pool)):
+            candidate = pool[(failed_index + offset) % len(pool)]
+            if account_is_cooling(
+                state_data["cooldowns"].get(candidate["account_id"]), observed
+            ):
+                continue
+            state_data["active_account_id"] = candidate["account_id"]
+            atomic_write_state(state_path, state_data)
+            return "rotated"
+
+        atomic_write_state(state_path, state_data)
+        return "quota_exhausted"
+
+
+def walk_values(value: Any) -> Iterator[Any]:
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from walk_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from walk_values(nested)
+    else:
+        yield value
+
+
+def walk_mappings(value: Any) -> Iterator[JsonObject]:
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from walk_mappings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from walk_mappings(nested)
+
+
+def matched_exact_string(value: Any, variants: set[str]) -> str | None:
+    for nested in walk_values(value):
+        if isinstance(nested, str) and nested.casefold() in variants:
+            return nested
+    return None
+
+
+def guardian_denial_variant(value: Any) -> str | None:
+    identity_keys = {"type", "event_type", "name", "kind"}
+    for mapping in walk_mappings(value):
+        identity = next(
+            (
+                field_value
+                for field_name, field_value in mapping.items()
+                if field_name.casefold() in identity_keys
+                and isinstance(field_value, str)
+                and field_value.casefold() in GUARDIAN_VARIANTS
+            ),
+            None,
+        )
+        if identity is None:
+            continue
+        for field_name, field_value in mapping.items():
+            if field_name.casefold() not in {"decision_source", "rationale"}:
+                continue
+            if isinstance(field_value, str) and any(
+                word in field_value.casefold() for word in DENIAL_WORDS
+            ):
+                return identity
+    return None
+
+
+def local_hook_variant(event: JsonObject) -> str | None:
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        return None
+    folded_type = item_type.casefold()
+    if folded_type == "approval_denied":
+        return item_type
+    if "commandexecutionapproval" not in folded_type:
+        return None
+    if any(
+        isinstance(value, str) and "denied" in value.casefold()
+        for value in walk_values(item)
+    ):
+        return item_type
+    return None
+
+
+def classify(stdout_path: Path, stderr_path: Path) -> Classification:
+    try:
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise WrapperFailure("could not read Codex output") from error
+
+    events: list[JsonObject] = []
+    malformed = False
+    local_variant: str | None = None
+    for line in stdout_text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            malformed = True
+            continue
+        if not isinstance(event, dict):
+            malformed = True
+            continue
+        events.append(event)
+        local_variant = local_variant or local_hook_variant(event)
+
+    if "Command blocked by PreToolUse hook" in stderr_text:
+        local_variant = "Command blocked by PreToolUse hook"
+
+    failure_events = [
+        event
+        for event in events
+        if isinstance(event.get("type"), str)
+        and event["type"].casefold() in {"turn.failed", "error"}
+    ]
+    has_failure_event = bool(failure_events)
+
+    cyber_variant: str | None = None
+    quota_variant: str | None = None
+    for event in failure_events:
+        if cyber_variant is None:
+            cyber_variant = matched_exact_string(event, CYBER_VARIANTS)
+        if cyber_variant is None:
+            cyber_variant = guardian_denial_variant(event)
+        if quota_variant is None:
+            quota_variant = matched_exact_string(event, QUOTA_VARIANTS)
+        if quota_variant is None:
+            for mapping in walk_mappings(event):
+                status = mapping.get("codex_error_http_status_code")
+                if status == 429 or status == "429":
+                    quota_variant = "codex_error_http_status_code=429"
+                    break
+
+    if local_variant is not None:
+        return Classification(
+            FailureClass.LOCAL_HOOK_DENY,
+            local_variant,
+            has_failure_event,
+            malformed,
+        )
+    if cyber_variant is not None:
+        return Classification(
+            FailureClass.CYBER, cyber_variant, has_failure_event, malformed
+        )
+    if quota_variant is not None:
+        return Classification(
+            FailureClass.QUOTA, quota_variant, has_failure_event, malformed
+        )
+    return Classification(FailureClass.UNKNOWN, None, has_failure_event, malformed)
+
+
+def copy_private_home(source_home: Path, attempt_home: Path, auth_path: Path) -> None:
+    config_path = source_home / "config.toml"
+    hooks_path = source_home / "hooks"
+    plugins_path = source_home / "plugins"
+    if not config_path.is_file() or not hooks_path.is_dir():
+        raise WrapperFailure("source config.toml or hooks directory is missing")
+    try:
+        shutil.copyfile(auth_path, attempt_home / "auth.json")
+        os.chmod(attempt_home / "auth.json", 0o600)
+        shutil.copy2(config_path, attempt_home / "config.toml", follow_symlinks=True)
+        shutil.copytree(hooks_path, attempt_home / "hooks", symlinks=False)
+        if plugins_path.exists():
+            if not plugins_path.is_dir():
+                raise WrapperFailure("source plugins path is not a directory")
+            shutil.copytree(plugins_path, attempt_home / "plugins", symlinks=False)
+    except OSError as error:
+        raise WrapperFailure("could not construct private CODEX_HOME") from error
+
+
+def launch_codex(
+    attempt_home: Path,
+    stdin_spool: Path,
+    codex_arguments: tuple[str, ...],
+) -> tuple[int, Path, Path]:
+    stdout_path = attempt_home / "stdout.jsonl"
+    stderr_path = attempt_home / "stderr.log"
+    child_environment = os.environ.copy()
+    child_environment["CODEX_HOME"] = str(attempt_home)
+    command = ["codex", "exec", "--ephemeral", "--json", *codex_arguments]
+    try:
+        with (
+            stdin_spool.open("rb") as stdin_stream,
+            stdout_path.open("wb") as stdout_stream,
+            stderr_path.open("wb") as stderr_stream,
+        ):
+            completed = subprocess.run(
+                command,
+                stdin=stdin_stream,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                env=child_environment,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WrapperFailure("could not launch Codex") from error
+    return completed.returncode, stdout_path, stderr_path
+
+
+def forward_stdout(stdout_path: Path) -> None:
+    try:
+        with stdout_path.open("rb") as stream:
+            shutil.copyfileobj(stream, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+    except OSError as error:
+        raise WrapperFailure("could not forward Codex stdout") from error
+
+
+def emit_tail(path: Path, heading: str) -> None:
+    try:
+        lines = path.read_bytes().splitlines(keepends=True)[-50:]
+    except OSError as error:
+        raise WrapperFailure("could not read diagnostic tail") from error
+    sys.stderr.buffer.write(f"--- {heading} (last 50 lines) ---\n".encode())
+    for line in lines:
+        sys.stderr.buffer.write(line)
+        if not line.endswith((b"\n", b"\r")):
+            sys.stderr.buffer.write(b"\n")
+    sys.stderr.buffer.flush()
+
+
+def task_signature(stdin_bytes: bytes, arguments: tuple[str, ...]) -> str:
+    hash_input = bytearray()
+    hash_input.extend(f"{len(stdin_bytes)}:".encode("ascii"))
+    hash_input.extend(stdin_bytes)
+    hash_input.extend(f"_{len(arguments)}:".encode("ascii"))
+    for argument in arguments:
+        hash_input.extend(os.fsencode(argument))
+    return hashlib.sha256(hash_input).hexdigest()
+
+
+def run() -> int:
+    run_root = Path(sys.argv[1])
+    stdin_spool = Path(sys.argv[2])
+    codex_arguments = tuple(sys.argv[3:])
+    task_sig: str | None = None
+    last_codex_exit: int | None = None
+
+    try:
+        stdin_bytes = stdin_spool.read_bytes()
+        task_sig = task_signature(stdin_bytes, codex_arguments)
+
+        source_home_raw = os.environ.get(
+            "CODEX_ROTATE_STATE_DIR", str(Path.home() / ".codex")
+        )
+        source_home = Path(source_home_raw).expanduser().absolute()
+        source_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        state_path = source_home / ".auth-active"
+        lock_path = source_home / ".auth-active.lock"
+        pool_paths = tuple(source_home / name for name in POOL_NAMES)
+        initialize_state(state_path, lock_path, pool_paths)
+
+        active_pool_entry(state_path, lock_path)
+        if os.environ.get("CODEX_KIMI_FORCE") == "1":
+            emit_status("force_kimi", task_sig, None)
+            return 75
+
+        local_hook_hits = 0
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            active_entry = active_pool_entry(state_path, lock_path)
+            attempt_home = Path(
+                tempfile.mkdtemp(prefix=f"attempt-{attempt}.", dir=run_root)
+            )
+            os.chmod(attempt_home, 0o700)
+            copy_private_home(
+                source_home, attempt_home, Path(active_entry["path"])
+            )
+            codex_exit, stdout_path, stderr_path = launch_codex(
+                attempt_home, stdin_spool, codex_arguments
+            )
+            last_codex_exit = codex_exit
+            classification = classify(stdout_path, stderr_path)
+
+            if (
+                codex_exit == 0
+                and not classification.has_failure_event
+                and not classification.has_malformed_line
+                and classification.failure_class is FailureClass.UNKNOWN
+            ):
+                reset_cyber_streak(state_path, lock_path, task_sig)
+                forward_stdout(stdout_path)
+                emit_status("success", task_sig, 0, attempts=attempt)
+                return 0
+
+            if classification.failure_class is FailureClass.LOCAL_HOOK_DENY:
+                reset_cyber_streak(state_path, lock_path, task_sig)
+                local_hook_hits += 1
+                if local_hook_hits >= 2:
+                    emit_status(
+                        "local_hook_deny_exceeded",
+                        task_sig,
+                        codex_exit,
+                        variant=classification.variant,
+                    )
+                    return 73
+                continue
+
+            if classification.failure_class is FailureClass.CYBER:
+                if classification.variant is None:
+                    raise WrapperFailure("cyber classification has no variant")
+                cyber_count = record_cyber_hit(
+                    state_path,
+                    lock_path,
+                    task_sig,
+                    classification.variant,
+                    datetime.now(timezone.utc),
+                )
+                if cyber_count >= 2:
+                    emit_status(
+                        "cyber_escalate",
+                        task_sig,
+                        codex_exit,
+                        variant=classification.variant,
+                    )
+                    return 75
+                continue
+
+            reset_cyber_streak(state_path, lock_path, task_sig)
+
+            if classification.failure_class is FailureClass.QUOTA:
+                if classification.variant is None:
+                    raise WrapperFailure("quota classification has no variant")
+                rotation = rotate_after_quota(
+                    state_path,
+                    lock_path,
+                    active_entry["account_id"],
+                    classification.variant,
+                    datetime.now(timezone.utc),
+                )
+                if rotation == "insufficient_distinct":
+                    emit_status(
+                        "no_eligible_credential", task_sig, codex_exit
+                    )
+                    return 74
+                if rotation == "quota_exhausted":
+                    emit_status("quota_exhausted", task_sig, codex_exit)
+                    return 72
+                continue
+
+            emit_status("unknown", task_sig, codex_exit)
+            emit_tail(stdout_path, "codex stdout JSONL")
+            emit_tail(stderr_path, "codex stderr")
+            return 76
+
+        emit_status("launch_budget_exhausted", task_sig, last_codex_exit)
+        return 70
+    except WrapperFailure:
+        emit_status("wrapper_failure", task_sig, last_codex_exit)
+        return 71
+    except Exception:
+        # The CLI boundary remaps unexpected implementation failures without
+        # exposing a traceback that could include private filesystem content.
+        emit_status("wrapper_failure", task_sig, last_codex_exit)
+        return 71
+
+
+raise SystemExit(run())
+PY
+status=$?
+set -e
+exit "$status"

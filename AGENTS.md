@@ -90,6 +90,11 @@
 - If main waits on agents, await every still-running in-scope subagent before using results; include the current delegation/`ECI`/`ATE`, excluding closed/completed/outside agents and shell jobs/tests/background services.
 - Independently verify subagent claims before relying on them.
 - Subagents follow session Stop-hook prompts/proof/checklists; fix in-scope blockers; completion reports remain allowed; report recovery to the orchestrator only when recovery needs out-of-scope changes, unrelated user work, credentials, or approval.
+- Codex-first delegation (default-deny guard, not cryptographic enforcement): ordinary subagent work runs through `~/.kimi-code/bin/codex-with-rotation` via Bash. The `codex-first-gate` PreToolUse hook denies `Agent`/`AgentSwarm` calls unless a fresh one-use capability marker exists under `~/.cache/kimi-proof/$SESSION_ID/cyber-escalation/`. This stops accidental Kimi-quota consumption; it does not defend against a hostile same-UID process.
+- Before calling `Agent`/`AgentSwarm` for a legitimate non-codex role (ECI/ATE: critic-step2, critic-A, critic-B, e2e-gate, brainstormer, loop-breaker, brp-feasibility-validator), run `codex-issue-marker --orchestration <role>` first; the marker authorizes exactly one spawn and expires after 600s.
+- On `codex-with-rotation` exit 75 (cyber escalation), capture the `task_sig` from its stderr JSON, run `codex-issue-marker --cyber <task_sig>`, then call `Agent` with the same label and prompt. Do not relaunch codex for that task.
+- Route wrapper exits exactly: 0 use output; 1 stop/report generic failure; 70 stop/report launch-budget exhaustion; 71 stop/report wrapper failure; 72 stop/surface quota exhaustion (all accounts); 73 stop/surface local-hook denial (never reclassify as cyber); 74 stop/surface no-eligible-credential; 75 follow the cyber-marker path above; 76 stop/surface raw output. `CODEX_KIMI_FORCE=1` forces immediate exit 75 (direct Kimi) without launching codex; it is process-wide break-glass.
+- `TaskOutput`/`TaskStop` control already-running work; they are not spawns and are out of scope for the gate.
 
 ## Environment/Stop
 
@@ -99,6 +104,7 @@
 | Environment; LAN DNAT | `192.168.141.16`; LAN devices may connect through `192.168.0.131` ports `7000-7019`, DNATed here |
 | Ollama; Bluetooth | `192.168.0.171:11434`; may use `hci1`/`hci2`, using `DBUS_SYSTEM_BUS_ADDRESS` when set |
 | Changed-work scan; large scratch | Gitleaks required on `PATH`; the stop gate hard-blocks if it cannot scan changed work. When default temp is tmpfs, use `$TMPDIR`/`~/tmp/` for large files/objects |
+| Codex delegation | `~/.kimi-code/bin/codex-with-rotation`; markers via `codex-issue-marker`; default-deny `Agent`/`AgentSwarm` via `codex-first-gate.sh`; markers expire 600s; `CODEX_KIMI_FORCE=1` is process-wide break-glass. See `codex-with-rotation --help`. |
 
 - When the stop hook blocks, follow its prompt. Follow `~/.cache/kimi-proof/$SESSION_ID/instructions.md` when present; use `~/.kimi-code/hooks/stop-checklist.md` as the acceptance checklist.
 - Use `~/.kimi-code/bin/skip-stop on` only in orchestration-only sessions where verification is redundant; always run `~/.kimi-code/bin/skip-stop off` before normal development.

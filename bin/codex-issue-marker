@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+roles=' critic-step2 critic-A critic-B e2e-gate brainstormer loop-breaker brp-feasibility-validator '
+
+show_help() {
+  cat <<'EOF'
+Usage:
+  codex-issue-marker [--session <id>] --cyber <64-hex-task-sig>
+  codex-issue-marker [--session <id>] --orchestration <role>
+  codex-issue-marker --help
+
+Issue one fresh, one-use capability marker for codex-first delegation.
+
+Modes:
+  --cyber <task-sig>
+      Issue a marker named by a 64-character lowercase hexadecimal task_sig.
+  --orchestration <role>
+      Issue a nonce marker for one approved ECI/ATE role. Allowed roles:
+      critic-step2, critic-A, critic-B, e2e-gate, brainstormer, loop-breaker,
+      brp-feasibility-validator.
+
+Session selection:
+  --session <id> overrides KIMI_SESSION_ID. A session ID may contain only
+  ASCII letters, digits, dot, underscore, and hyphen.
+
+The marker path is printed to stdout. Markers are claimed once by
+codex-first-gate.sh and expire after 600 seconds.
+EOF
+}
+
+fail() {
+  printf '%s: %s\n' "$program" "$1" >&2
+  exit 2
+}
+
+sid=${KIMI_SESSION_ID:-}
+mode=
+value=
+
+while (($#)); do
+  case $1 in
+    --help)
+      show_help
+      exit 0
+      ;;
+    --session)
+      (($# >= 2)) || fail '--session requires a value'
+      sid=$2
+      shift 2
+      ;;
+    --cyber|--orchestration)
+      [[ -z $mode ]] || fail 'choose exactly one marker mode'
+      (($# >= 2)) || fail "$1 requires a value"
+      mode=$1
+      value=$2
+      shift 2
+      ;;
+    *)
+      fail "unexpected argument: $1"
+      ;;
+  esac
+done
+
+[[ -n $sid ]] || fail 'KIMI_SESSION_ID or --session is required'
+[[ $sid =~ ^[A-Za-z0-9._-]+$ ]] || fail 'invalid session ID'
+
+case $mode in
+  --cyber)
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || fail 'task_sig must be 64 lowercase hexadecimal characters'
+    name=$value
+    ;;
+  --orchestration)
+    [[ $roles == *" $value "* ]] || fail 'invalid orchestration role'
+    nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+    [[ $nonce =~ ^[0-9a-f]{16}$ ]] || fail 'could not generate nonce'
+    name=orchestration-$value-$nonce
+    ;;
+  *)
+    fail 'choose --cyber or --orchestration'
+    ;;
+esac
+
+umask 077
+base=$HOME/.cache/kimi-proof
+session_dir=$base/$sid
+dir=$session_dir/cyber-escalation
+mkdir -p -- "$dir"
+[[ ! -L $base && ! -L $session_dir && ! -L $dir ]] || fail 'marker directory must not be a symlink'
+chmod 700 -- "$base" "$session_dir" "$dir"
+
+exec {dfd}<"$dir"
+flock -x "$dfd"
+
+tmp=
+cleanup() {
+  if [[ -n ${tmp:-} && $tmp == "$dir"/.tmp.* ]]; then
+    rm -f -- "$tmp"
+  fi
+}
+trap cleanup EXIT
+
+tmp=$(mktemp "$dir/.tmp.XXXXXX")
+date +%s >"$tmp"
+mv -f -- "$tmp" "$dir/$name"
+tmp=
+
+flock -u "$dfd"
+printf '%s\n' "$dir/$name"
