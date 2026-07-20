@@ -1,0 +1,909 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, TypeAlias
+
+
+PROGRAM = "codex-with-rotation"
+STATE_VERSION = 1
+COOLDOWN_SECONDS = 600
+CYBER_WINDOW_SECONDS = 600
+DIAGNOSTIC_TAIL_LINES = 50
+LOCAL_HOOK_STDERR = b"Command blocked by PreToolUse hook"
+
+CYBER_VARIANTS = {
+    "cyberpolicyresponse",
+    "cyber_policy",
+    "highriskcyberactivity",
+    "high_risk_cyber_activity",
+}
+GUARDIAN_VARIANTS = {"guardianassessmentevent", "guardian_assessment_event"}
+QUOTA_VARIANTS = {
+    "usagelimitreached",
+    "usage_limit_reached",
+    "ratelimitreached",
+    "rate_limit_reached",
+    "sessionbudgetexceeded",
+    "session_budget_exceeded",
+    "quotaexceeded",
+    "quota_exceeded",
+    "usagenotincluded",
+    "usage_not_included",
+}
+DENIAL_WORDS = ("deny", "block", "reject")
+
+JsonObject: TypeAlias = dict[str, Any]
+
+
+class FailureClass(str, Enum):
+    LOCAL_HOOK_DENY = "local_hook_deny"
+    CYBER = "cyber"
+    QUOTA = "quota"
+    UNKNOWN = "unknown"
+
+
+class WrapperFailure(RuntimeError):
+    """An internal condition that must be remapped to wrapper exit 71."""
+
+
+@dataclass(frozen=True)
+class LineClassification:
+    failure_class: FailureClass | None
+    variant: str | None
+    is_failure_event: bool
+    is_malformed: bool
+
+
+@dataclass(frozen=True)
+class Classification:
+    failure_class: FailureClass
+    variant: str | None
+    has_failure_event: bool
+    has_malformed_line: bool
+    stdout_tail: tuple[bytes, ...]
+    stderr_tail: tuple[bytes, ...]
+
+
+@dataclass(frozen=True)
+class RunArguments:
+    run_root: Path
+    stdin_spool: Path
+    label: str | None
+    max_attempts: int
+    pool_names: tuple[str, ...]
+    codex_arguments: tuple[str, ...]
+
+
+def compact_json(payload: JsonObject) -> str:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=False)
+
+
+def emit_status(
+    failure_class: str,
+    task_sig: str | None,
+    codex_exit: int | None,
+    label: str | None,
+    *,
+    variant: str | None = None,
+    attempts: int | None = None,
+) -> None:
+    payload: JsonObject = {
+        "wrapper": PROGRAM,
+        "class": failure_class,
+        "label": label,
+        "task_sig": task_sig,
+        "codex_exit": codex_exit,
+    }
+    if variant is not None:
+        payload["variant"] = variant
+    if attempts is not None:
+        payload["attempts"] = attempts
+    print(compact_json(payload), file=sys.stderr)
+
+
+def format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def parse_utc(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise WrapperFailure("invalid RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise WrapperFailure("invalid RFC3339 timestamp") from error
+    if parsed.tzinfo is None:
+        raise WrapperFailure("timestamp has no timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def prune_expired_state(state_data: JsonObject, observed: datetime) -> None:
+    cooldowns = state_data.get("cooldowns")
+    if not isinstance(cooldowns, dict):
+        raise WrapperFailure("invalid cooldown map")
+    for account_id, entry in list(cooldowns.items()):
+        if not isinstance(entry, dict):
+            raise WrapperFailure("invalid cooldown entry")
+        if parse_utc(entry.get("until_utc")) <= observed:
+            del cooldowns[account_id]
+
+    streaks = state_data.get("cyber_streaks")
+    if not isinstance(streaks, dict) or not isinstance(streaks.get("tasks"), dict):
+        raise WrapperFailure("invalid cyber streak map")
+    tasks = streaks["tasks"]
+    for task_sig, entry in list(tasks.items()):
+        if not isinstance(entry, dict):
+            raise WrapperFailure("invalid cyber streak entry")
+        last_observed = entry.get("last_observed_utc")
+        if last_observed is None:
+            del tasks[task_sig]
+            continue
+        age = (observed - parse_utc(last_observed)).total_seconds()
+        if age > CYBER_WINDOW_SECONDS:
+            del tasks[task_sig]
+
+
+def atomic_write_state(state_path: Path, state_data: JsonObject) -> None:
+    prune_expired_state(state_data, datetime.now(timezone.utc))
+    temporary_fd = -1
+    temporary_name = ""
+    try:
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{state_path.name}.", dir=state_path.parent
+        )
+        os.fchmod(temporary_fd, 0o600)
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+            temporary_fd = -1
+            json.dump(state_data, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, state_path)
+        temporary_name = ""
+        directory_fd = os.open(state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise WrapperFailure("could not write state atomically") from error
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+
+def record_wrapper_error(run_root: Path, error: BaseException) -> None:
+    error_path = run_root / "wrapper-error.log"
+    causal_chain: list[str] = []
+    current: BaseException | None = error
+    while current is not None:
+        causal_chain.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    try:
+        descriptor = os.open(
+            error_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            0o600,
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write("\ncaused by: ".join(causal_chain))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        return
+
+
+@contextmanager
+def state_lock(lock_path: Path, *, exclusive: bool) -> Iterator[None]:
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    except OSError as error:
+        raise WrapperFailure("could not acquire state lock") from error
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def account_id_from_auth(auth_path: Path) -> str:
+    try:
+        with auth_path.open("r", encoding="utf-8") as stream:
+            auth_document = json.load(stream)
+        account_id = auth_document["tokens"]["account_id"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise WrapperFailure(f"cannot read account_id from {auth_path}") from error
+    finally:
+        if "auth_document" in locals():
+            del auth_document
+    if not isinstance(account_id, str) or not account_id:
+        raise WrapperFailure(f"invalid account_id in {auth_path}")
+    return account_id
+
+
+def initial_state(pool_paths: tuple[Path, ...]) -> JsonObject:
+    pool: list[JsonObject] = []
+    seen_account_ids: set[str] = set()
+    for pool_path in pool_paths:
+        if not pool_path.exists():
+            continue
+        account_id = account_id_from_auth(pool_path)
+        if account_id in seen_account_ids:
+            continue
+        seen_account_ids.add(account_id)
+        pool.append({"account_id": account_id, "path": str(pool_path)})
+    if not pool:
+        raise WrapperFailure("credential pool is empty")
+    return {
+        "version": STATE_VERSION,
+        "active_account_id": pool[0]["account_id"],
+        "pool": pool,
+        "cooldowns": {},
+        "cyber_streaks": {
+            "global": {"count": 0, "last_observed_utc": None, "variant": None},
+            "tasks": {},
+        },
+    }
+
+
+def validate_state(state_path: Path, state_data: Any) -> JsonObject:
+    if not isinstance(state_data, dict) or state_data.get("version") != STATE_VERSION:
+        raise WrapperFailure("unsupported or corrupt state")
+    pool = state_data.get("pool")
+    if not isinstance(pool, list) or not pool:
+        raise WrapperFailure("state pool is empty or invalid")
+    seen: set[str] = set()
+    for entry in pool:
+        if not isinstance(entry, dict):
+            raise WrapperFailure("invalid pool entry")
+        account_id = entry.get("account_id")
+        path = entry.get("path")
+        if (
+            not isinstance(account_id, str)
+            or not account_id
+            or account_id in seen
+            or not isinstance(path, str)
+            or not path
+        ):
+            raise WrapperFailure("invalid or duplicate pool entry")
+        seen.add(account_id)
+    if state_data.get("active_account_id") not in seen:
+        raise WrapperFailure("active account is not in the pool")
+    if not isinstance(state_data.get("cooldowns"), dict):
+        raise WrapperFailure("invalid cooldown map")
+    streaks = state_data.get("cyber_streaks")
+    if not isinstance(streaks, dict) or not isinstance(streaks.get("tasks"), dict):
+        raise WrapperFailure("invalid cyber streak map")
+    try:
+        state_mode = stat.S_IMODE(state_path.stat().st_mode)
+    except OSError as error:
+        raise WrapperFailure("could not stat state file") from error
+    if state_mode != 0o600:
+        raise WrapperFailure("state file mode is not 0600")
+    return state_data
+
+
+def read_state_unlocked(state_path: Path) -> JsonObject:
+    try:
+        with state_path.open("r", encoding="utf-8") as stream:
+            state_data = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        raise WrapperFailure("could not parse state") from error
+    return validate_state(state_path, state_data)
+
+
+def initialize_state(
+    state_path: Path,
+    lock_path: Path,
+    pool_paths: tuple[Path, ...],
+) -> None:
+    with state_lock(lock_path, exclusive=True):
+        if not state_path.exists():
+            atomic_write_state(state_path, initial_state(pool_paths))
+        read_state_unlocked(state_path)
+
+
+def active_pool_entry(state_path: Path, lock_path: Path) -> JsonObject:
+    with state_lock(lock_path, exclusive=False):
+        state_data = read_state_unlocked(state_path)
+        active_id = state_data["active_account_id"]
+        for entry in state_data["pool"]:
+            if entry["account_id"] == active_id:
+                return dict(entry)
+    raise WrapperFailure("active account disappeared")
+
+
+def reset_cyber_streak(state_path: Path, lock_path: Path, task_sig: str) -> None:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        tasks = state_data["cyber_streaks"]["tasks"]
+        if task_sig not in tasks:
+            return
+        del tasks[task_sig]
+        atomic_write_state(state_path, state_data)
+
+
+def record_cyber_hit(
+    state_path: Path,
+    lock_path: Path,
+    task_sig: str,
+    variant: str,
+    observed: datetime,
+) -> int:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        tasks = state_data["cyber_streaks"]["tasks"]
+        previous = tasks.get(task_sig)
+        count = 1
+        if isinstance(previous, dict) and isinstance(previous.get("count"), int):
+            previous_time_raw = previous.get("last_observed_utc")
+            if previous["count"] > 0 and previous_time_raw is not None:
+                previous_time = parse_utc(previous_time_raw)
+                age = (observed - previous_time).total_seconds()
+                if 0 <= age <= CYBER_WINDOW_SECONDS:
+                    count = previous["count"] + 1
+        tasks[task_sig] = {
+            "count": count,
+            "last_observed_utc": format_utc(observed),
+            "variant": variant,
+        }
+        atomic_write_state(state_path, state_data)
+        return count
+
+
+def account_is_cooling(entry: Any, observed: datetime) -> bool:
+    if entry is None:
+        return False
+    if not isinstance(entry, dict) or "until_utc" not in entry:
+        raise WrapperFailure("invalid cooldown entry")
+    return parse_utc(entry["until_utc"]) > observed
+
+
+def rotate_after_quota(
+    state_path: Path,
+    lock_path: Path,
+    failed_account_id: str,
+    variant: str,
+    observed: datetime,
+) -> str:
+    with state_lock(lock_path, exclusive=True):
+        state_data = read_state_unlocked(state_path)
+        pool = state_data["pool"]
+        if len(pool) < 2:
+            return "insufficient_distinct"
+
+        state_data["cooldowns"][failed_account_id] = {
+            "until_utc": format_utc(observed + timedelta(seconds=COOLDOWN_SECONDS)),
+            "variant": variant,
+            "observed_utc": format_utc(observed),
+        }
+
+        if state_data["active_account_id"] != failed_account_id:
+            atomic_write_state(state_path, state_data)
+            return "changed_elsewhere"
+
+        failed_index = next(
+            (
+                index
+                for index, entry in enumerate(pool)
+                if entry["account_id"] == failed_account_id
+            ),
+            None,
+        )
+        if failed_index is None:
+            raise WrapperFailure("failed account is not in the pool")
+
+        for offset in range(1, len(pool)):
+            candidate = pool[(failed_index + offset) % len(pool)]
+            if account_is_cooling(
+                state_data["cooldowns"].get(candidate["account_id"]), observed
+            ):
+                continue
+            state_data["active_account_id"] = candidate["account_id"]
+            atomic_write_state(state_path, state_data)
+            return "rotated"
+
+        atomic_write_state(state_path, state_data)
+        return "quota_exhausted"
+
+
+def walk_values(value: Any) -> Iterator[Any]:
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from walk_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from walk_values(nested)
+    else:
+        yield value
+
+
+def walk_mappings(value: Any) -> Iterator[JsonObject]:
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from walk_mappings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from walk_mappings(nested)
+
+
+def matched_exact_string(value: Any, variants: set[str]) -> str | None:
+    for nested in walk_values(value):
+        if isinstance(nested, str) and nested.casefold() in variants:
+            return nested
+    return None
+
+
+def guardian_denial_variant(value: Any) -> str | None:
+    identity_keys = {"type", "event_type", "name", "kind"}
+    for mapping in walk_mappings(value):
+        identity = next(
+            (
+                field_value
+                for field_name, field_value in mapping.items()
+                if field_name.casefold() in identity_keys
+                and isinstance(field_value, str)
+                and field_value.casefold() in GUARDIAN_VARIANTS
+            ),
+            None,
+        )
+        if identity is None:
+            continue
+        for field_name, field_value in mapping.items():
+            if field_name.casefold() not in {"decision_source", "rationale"}:
+                continue
+            if isinstance(field_value, str) and any(
+                word in field_value.casefold() for word in DENIAL_WORDS
+            ):
+                return identity
+    return None
+
+
+def local_hook_variant(event: JsonObject) -> str | None:
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        return None
+    folded_type = item_type.casefold()
+    if folded_type == "approval_denied":
+        return item_type
+    if "commandexecutionapproval" not in folded_type:
+        return None
+    if any(
+        isinstance(value, str) and "denied" in value.casefold()
+        for value in walk_values(item)
+    ):
+        return item_type
+    return None
+
+
+def classify_line(raw_line: bytes) -> LineClassification:
+    if not raw_line.strip():
+        return LineClassification(None, None, False, False)
+    try:
+        event = json.loads(raw_line.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return LineClassification(None, None, False, True)
+    if not isinstance(event, dict):
+        return LineClassification(None, None, False, True)
+
+    event_type = event.get("type")
+    is_failure_event = isinstance(event_type, str) and event_type.casefold() in {
+        "turn.failed",
+        "error",
+    }
+    local_variant = local_hook_variant(event)
+    if local_variant is not None:
+        return LineClassification(
+            FailureClass.LOCAL_HOOK_DENY,
+            local_variant,
+            is_failure_event,
+            False,
+        )
+    if not is_failure_event:
+        return LineClassification(None, None, False, False)
+
+    cyber_variant = matched_exact_string(event, CYBER_VARIANTS)
+    if cyber_variant is None:
+        cyber_variant = guardian_denial_variant(event)
+    if cyber_variant is not None:
+        return LineClassification(FailureClass.CYBER, cyber_variant, True, False)
+
+    quota_variant = matched_exact_string(event, QUOTA_VARIANTS)
+    if quota_variant is None:
+        for mapping in walk_mappings(event):
+            status_code = mapping.get("codex_error_http_status_code")
+            if status_code == 429 or status_code == "429":
+                quota_variant = "codex_error_http_status_code=429"
+                break
+    if quota_variant is not None:
+        return LineClassification(FailureClass.QUOTA, quota_variant, True, False)
+    return LineClassification(None, None, True, False)
+
+
+def scan_stderr(stderr_path: Path) -> tuple[str | None, tuple[bytes, ...]]:
+    tail: deque[bytes] = deque(maxlen=DIAGNOSTIC_TAIL_LINES)
+    try:
+        with stderr_path.open("rb") as stream:
+            for raw_line in stream:
+                tail.append(raw_line)
+                if LOCAL_HOOK_STDERR in raw_line:
+                    return LOCAL_HOOK_STDERR.decode("ascii"), tuple(tail)
+    except OSError as error:
+        raise WrapperFailure("could not read Codex stderr") from error
+    return None, tuple(tail)
+
+
+def classify(stdout_path: Path, stderr_path: Path) -> Classification:
+    stderr_variant, stderr_tail = scan_stderr(stderr_path)
+    if stderr_variant is not None:
+        return Classification(
+            FailureClass.LOCAL_HOOK_DENY,
+            stderr_variant,
+            False,
+            False,
+            (),
+            stderr_tail,
+        )
+
+    stdout_tail: deque[bytes] = deque(maxlen=DIAGNOSTIC_TAIL_LINES)
+    failure_class = FailureClass.UNKNOWN
+    variant: str | None = None
+    has_failure_event = False
+    has_malformed_line = False
+    try:
+        with stdout_path.open("rb") as stream:
+            for raw_line in stream:
+                stdout_tail.append(raw_line)
+                line_result = classify_line(raw_line)
+                has_failure_event = (
+                    has_failure_event or line_result.is_failure_event
+                )
+                has_malformed_line = has_malformed_line or line_result.is_malformed
+                if line_result.failure_class is None:
+                    continue
+                failure_class = line_result.failure_class
+                variant = line_result.variant
+                break
+    except OSError as error:
+        raise WrapperFailure("could not read Codex stdout") from error
+
+    return Classification(
+        failure_class,
+        variant,
+        has_failure_event,
+        has_malformed_line,
+        tuple(stdout_tail),
+        stderr_tail,
+    )
+
+
+def copy_private_home(source_home: Path, attempt_home: Path, auth_path: Path) -> None:
+    config_path = source_home / "config.toml"
+    hooks_path = source_home / "hooks"
+    plugins_path = source_home / "plugins"
+    if not config_path.is_file() or not hooks_path.is_dir():
+        raise WrapperFailure("source config.toml or hooks directory is missing")
+    try:
+        shutil.copyfile(auth_path, attempt_home / "auth.json")
+        os.chmod(attempt_home / "auth.json", 0o600)
+        shutil.copy2(config_path, attempt_home / "config.toml", follow_symlinks=True)
+        shutil.copytree(hooks_path, attempt_home / "hooks", symlinks=False)
+        if plugins_path.exists():
+            if not plugins_path.is_dir():
+                raise WrapperFailure("source plugins path is not a directory")
+            shutil.copytree(plugins_path, attempt_home / "plugins", symlinks=False)
+    except OSError as error:
+        raise WrapperFailure("could not construct private CODEX_HOME") from error
+
+
+def launch_codex(
+    attempt_home: Path,
+    stdin_spool: Path,
+    codex_arguments: tuple[str, ...],
+) -> tuple[int, Path, Path]:
+    stdout_path = attempt_home / "stdout.jsonl"
+    stderr_path = attempt_home / "stderr.log"
+    child_environment = os.environ.copy()
+    child_environment["CODEX_HOME"] = str(attempt_home)
+    command = ["codex", "exec", "--ephemeral", "--json", *codex_arguments]
+    try:
+        with (
+            stdin_spool.open("rb") as stdin_stream,
+            stdout_path.open("wb") as stdout_stream,
+            stderr_path.open("wb") as stderr_stream,
+        ):
+            completed = subprocess.run(
+                command,
+                stdin=stdin_stream,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                env=child_environment,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WrapperFailure("could not launch Codex") from error
+    return completed.returncode, stdout_path, stderr_path
+
+
+def forward_stdout(stdout_path: Path) -> None:
+    try:
+        with stdout_path.open("rb") as stream:
+            shutil.copyfileobj(stream, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+    except OSError as error:
+        raise WrapperFailure("could not forward Codex stdout") from error
+
+
+def emit_tail(lines: tuple[bytes, ...], heading: str) -> None:
+    sys.stderr.buffer.write(
+        f"--- {heading} (last {DIAGNOSTIC_TAIL_LINES} lines) ---\n".encode()
+    )
+    for line in lines:
+        sys.stderr.buffer.write(line)
+        if not line.endswith((b"\n", b"\r")):
+            sys.stderr.buffer.write(b"\n")
+    sys.stderr.buffer.flush()
+
+
+def task_signature(stdin_spool: Path, arguments: tuple[str, ...]) -> str:
+    try:
+        stdin_length = stdin_spool.stat().st_size
+        digest = hashlib.sha256()
+        digest.update(f"{stdin_length}:".encode("ascii"))
+        with stdin_spool.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise WrapperFailure("could not hash stdin spool") from error
+    digest.update(f"_{len(arguments)}:".encode("ascii"))
+    for argument in arguments:
+        digest.update(os.fsencode(argument))
+    return digest.hexdigest()
+
+
+def run_wrapper(arguments: RunArguments) -> int:
+    task_sig: str | None = None
+    last_codex_exit: int | None = None
+
+    try:
+        task_sig = task_signature(arguments.stdin_spool, arguments.codex_arguments)
+        source_home_raw = os.environ.get(
+            "CODEX_ROTATE_STATE_DIR", str(Path.home() / ".codex")
+        )
+        source_home = Path(source_home_raw).expanduser().absolute()
+        source_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        state_path = source_home / ".auth-active"
+        lock_path = source_home / ".auth-active.lock"
+        pool_paths = tuple(source_home / name for name in arguments.pool_names)
+        initialize_state(state_path, lock_path, pool_paths)
+
+        active_pool_entry(state_path, lock_path)
+        if os.environ.get("CODEX_KIMI_FORCE") == "1":
+            emit_status("force_kimi", task_sig, None, arguments.label)
+            return 75
+
+        local_hook_hits = 0
+        for attempt in range(1, arguments.max_attempts + 1):
+            active_entry = active_pool_entry(state_path, lock_path)
+            attempt_home = Path(
+                tempfile.mkdtemp(prefix=f"attempt-{attempt}.", dir=arguments.run_root)
+            )
+            os.chmod(attempt_home, 0o700)
+            copy_private_home(source_home, attempt_home, Path(active_entry["path"]))
+            codex_exit, stdout_path, stderr_path = launch_codex(
+                attempt_home,
+                arguments.stdin_spool,
+                arguments.codex_arguments,
+            )
+            last_codex_exit = codex_exit
+            classification = classify(stdout_path, stderr_path)
+
+            if (
+                codex_exit == 0
+                and not classification.has_failure_event
+                and not classification.has_malformed_line
+                and classification.failure_class is FailureClass.UNKNOWN
+            ):
+                reset_cyber_streak(state_path, lock_path, task_sig)
+                forward_stdout(stdout_path)
+                emit_status(
+                    "success",
+                    task_sig,
+                    0,
+                    arguments.label,
+                    attempts=attempt,
+                )
+                return 0
+
+            if classification.failure_class is FailureClass.LOCAL_HOOK_DENY:
+                reset_cyber_streak(state_path, lock_path, task_sig)
+                local_hook_hits += 1
+                if local_hook_hits >= 2:
+                    emit_status(
+                        "local_hook_deny_exceeded",
+                        task_sig,
+                        codex_exit,
+                        arguments.label,
+                        variant=classification.variant,
+                    )
+                    return 73
+                continue
+
+            if classification.failure_class is FailureClass.CYBER:
+                if classification.variant is None:
+                    raise WrapperFailure("cyber classification has no variant")
+                cyber_count = record_cyber_hit(
+                    state_path,
+                    lock_path,
+                    task_sig,
+                    classification.variant,
+                    datetime.now(timezone.utc),
+                )
+                if cyber_count >= 2:
+                    emit_status(
+                        "cyber_escalate",
+                        task_sig,
+                        codex_exit,
+                        arguments.label,
+                        variant=classification.variant,
+                    )
+                    return 75
+                continue
+
+            reset_cyber_streak(state_path, lock_path, task_sig)
+
+            if classification.failure_class is FailureClass.QUOTA:
+                if classification.variant is None:
+                    raise WrapperFailure("quota classification has no variant")
+                rotation = rotate_after_quota(
+                    state_path,
+                    lock_path,
+                    active_entry["account_id"],
+                    classification.variant,
+                    datetime.now(timezone.utc),
+                )
+                if rotation == "insufficient_distinct":
+                    emit_status(
+                        "no_eligible_credential",
+                        task_sig,
+                        codex_exit,
+                        arguments.label,
+                    )
+                    return 74
+                if rotation == "quota_exhausted":
+                    emit_status(
+                        "quota_exhausted",
+                        task_sig,
+                        codex_exit,
+                        arguments.label,
+                    )
+                    return 72
+                continue
+
+            emit_status("unknown", task_sig, codex_exit, arguments.label)
+            emit_tail(classification.stdout_tail, "codex stdout JSONL")
+            emit_tail(classification.stderr_tail, "codex stderr")
+            return 76
+
+        emit_status(
+            "launch_budget_exhausted",
+            task_sig,
+            last_codex_exit,
+            arguments.label,
+        )
+        return 70
+    except WrapperFailure as error:
+        record_wrapper_error(arguments.run_root, error)
+        emit_status("wrapper_failure", task_sig, last_codex_exit, arguments.label)
+        return 71
+    except Exception as error:
+        record_wrapper_error(arguments.run_root, error)
+        emit_status("wrapper_failure", task_sig, last_codex_exit, arguments.label)
+        return 71
+
+
+def parse_run_arguments(raw_arguments: list[str]) -> RunArguments:
+    if len(raw_arguments) < 5:
+        raise WrapperFailure("incomplete classifier invocation")
+    run_root = Path(raw_arguments[0])
+    stdin_spool = Path(raw_arguments[1])
+    label = raw_arguments[2] or None
+    try:
+        max_attempts = int(raw_arguments[3])
+        pool_count = int(raw_arguments[4])
+    except ValueError as error:
+        raise WrapperFailure("invalid numeric classifier argument") from error
+    if max_attempts < 1 or pool_count < 1:
+        raise WrapperFailure("invalid classifier limits")
+    pool_end = 5 + pool_count
+    if len(raw_arguments) < pool_end:
+        raise WrapperFailure("missing pool names")
+    pool_names = tuple(raw_arguments[5:pool_end])
+    if any(
+        not name or Path(name).name != name or name in {".", ".."}
+        for name in pool_names
+    ):
+        raise WrapperFailure("invalid pool name")
+    return RunArguments(
+        run_root,
+        stdin_spool,
+        label,
+        max_attempts,
+        pool_names,
+        tuple(raw_arguments[pool_end:]),
+    )
+
+
+def classify_only(stdout_raw: str, stderr_raw: str) -> int:
+    result = classify(Path(stdout_raw), Path(stderr_raw))
+    print(
+        compact_json(
+            {
+                "class": result.failure_class.value,
+                "variant": result.variant,
+                "has_failure_event": result.has_failure_event,
+                "has_malformed_line": result.has_malformed_line,
+                "stdout_tail_lines": len(result.stdout_tail),
+                "stderr_tail_lines": len(result.stderr_tail),
+            }
+        )
+    )
+    return 0
+
+
+def main(raw_arguments: list[str]) -> int:
+    if len(raw_arguments) == 3 and raw_arguments[0] == "classify":
+        try:
+            return classify_only(raw_arguments[1], raw_arguments[2])
+        except WrapperFailure:
+            return 71
+    if raw_arguments and raw_arguments[0] == "run":
+        try:
+            arguments = parse_run_arguments(raw_arguments[1:])
+        except WrapperFailure:
+            emit_status("wrapper_failure", None, None, None)
+            return 71
+        return run_wrapper(arguments)
+    print(
+        "usage: codex-with-rotation-classify "
+        "{run <internal-args> | classify <stdout> <stderr>}",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

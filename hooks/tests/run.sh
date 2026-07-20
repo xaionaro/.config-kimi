@@ -298,6 +298,13 @@ if not isinstance(hooks, list) or not hooks:
     raise SystemExit(1)
 if any(not isinstance(entry, dict) or not set(entry) <= allowed for entry in hooks):
     raise SystemExit(1)
+codex_gate = [
+    entry
+    for entry in hooks
+    if "codex-first-gate.sh" in entry.get("command", "")
+]
+if len(codex_gate) != 1 or codex_gate[0].get("matcher") != "^(Agent|AgentSwarm)$":
+    raise SystemExit(1)
 PY
 }
 
@@ -346,20 +353,28 @@ test_bootstrap_config_accepts_symlinked_parent_aliases() {
   done
 }
 
-test_bootstrap_config_preserves_existing_regular_file() {
+test_bootstrap_config_injects_gate_once_and_preserves_existing_prefix() {
   local data_root="$BOOTSTRAP_TMP_ROOT/bootstrap-repeat"
   local expected="$BOOTSTRAP_TMP_ROOT/bootstrap-repeat.expected"
+  local expected_size
   mkdir -m 0755 "$data_root" || return 1
   printf '%s\n' 'local configuration stays local' >"$data_root/config.toml"
   cp "$data_root/config.toml" "$expected" || return 1
+  expected_size="$(stat -c %s "$expected")" || return 1
   chmod 0644 "$data_root/config.toml" || return 1
 
   bootstrap_config "$data_root" || return 1
   bootstrap_config "$data_root" || return 1
 
-  cmp -s "$expected" "$data_root/config.toml" &&
+  cmp -n "$expected_size" "$expected" "$data_root/config.toml" &&
+    [ "$(grep -cF 'codex-first-gate.sh' "$data_root/config.toml")" -eq 1 ] &&
     [ "$(stat -c %a "$data_root")" = 700 ] &&
     [ "$(stat -c %a "$data_root/config.toml")" = 600 ]
+}
+
+test_codex_with_rotation_python_suite() {
+  PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$ROOT/bin/tests/test_codex_with_rotation.py" >/dev/null
 }
 
 test_bootstrap_config_rejects_symlink_root() {
@@ -7666,8 +7681,8 @@ run_case "config bootstrap creates once with private modes" \
   test_bootstrap_config_creates_once_with_private_modes
 run_case "config bootstrap accepts symlinked parent aliases" \
   test_bootstrap_config_accepts_symlinked_parent_aliases
-run_case "config bootstrap preserves existing regular file bytes" \
-  test_bootstrap_config_preserves_existing_regular_file
+run_case "config bootstrap injects gate once and preserves existing prefix" \
+  test_bootstrap_config_injects_gate_once_and_preserves_existing_prefix
 run_case "config bootstrap rejects symlink root" \
   test_bootstrap_config_rejects_symlink_root
 run_case "config bootstrap rejects symlink and nonregular targets" \
@@ -7676,6 +7691,8 @@ run_case "config bootstrap rejects unsafe roots" \
   test_bootstrap_config_rejects_unsafe_roots
 run_case "config bootstrap concurrent create is atomic" \
   test_bootstrap_config_concurrent_create_is_atomic
+run_case "codex rotation Python suite" \
+  test_codex_with_rotation_python_suite
 run_case "prompt state is silent and records HEAD" \
   test_prompt_state_is_silent_records_head_and_clears_bypass
 run_case "prompt state marks /side prompts" \

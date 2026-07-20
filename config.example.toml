@@ -48,6 +48,11 @@ command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/edit-bash-
 timeout = 75
 
 [[hooks]]
+event = "PreToolUse"
+matcher = "^(Agent|AgentSwarm)$"
+command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/codex-first-gate.sh\"'"
+
+[[hooks]]
 event = "Stop"
 command = "bash -lc 'exec \"${KIMI_CODE_HOME:-$HOME/.kimi-code}/hooks/stop-gate.sh\"'"
 timeout = 300

@@ -11,9 +11,9 @@ printf '%s\n' 'the task prompt' |
   ~/.kimi-code/bin/codex-with-rotation --label implementer -- --sandbox workspace-write
 ```
 
-`--label` is wrapper-only routing metadata. The current protocol does not emit,
-forward, or hash it. Everything after `--` is passed literally after
-`codex exec --ephemeral --json`.
+`--label` is included in every classifier-emitted status JSON object for caller
+correlation. It is not forwarded to Codex or included in `task_sig`. Everything
+after `--` is passed literally after `codex exec --ephemeral --json`.
 
 The wrapper captures stdin once in a mode-0600 spool under `~/tmp/`. Each of at
 most three attempts receives the same bytes and literal argv.
@@ -44,6 +44,21 @@ the shared lock. Quota rotation re-reads `active_account_id` under the exclusive
 lock; if another process already moved it away from the failed ID, the stale
 process records the failed account's cooldown but does not rotate again.
 
+Every state write drops cooldowns whose `until_utc` has passed and task streaks
+whose `last_observed_utc` is more than 600 seconds old. Resetting a task removes
+its entry instead of retaining a zero-count tombstone.
+
+## Constant ownership
+
+- `bin/codex-with-rotation` owns the readonly `MAX_ATTEMPTS` and `POOL_NAMES`
+  Bash constants. It renders them into help and passes them to the classifier.
+- `bin/codex-with-rotation-classify` owns state schema, cooldown/window lengths,
+  classification variants, within-event priority, and the 50-line
+  diagnostic-tail bound as Python module constants.
+- Pool filenames seed `.auth-active.pool` only when state is first created.
+  Thereafter the locked state file is the account-order source of truth; changing
+  `POOL_NAMES` requires an explicit state migration or reseed.
+
 ## Task signature
 
 `task_sig` is a 64-character lowercase SHA-256 digest. Its input is defined by
@@ -64,8 +79,15 @@ correlation key, not a cryptographic encoding of an unambiguous argv tuple.
 
 ## Classification and actions
 
-Classification precedence is `local_hook_deny`, `cyber`, `quota`, then
-`unknown`.
+Within one stdout event, classification precedence is `local_hook_deny`,
+`cyber`, `quota`, then `unknown`. Stderr is scanned first for the local-hook
+substring; otherwise, the first decisive stdout line determines the result.
+
+The classifier reads stdout JSONL and stderr line-by-line. Each parsed event is
+discarded immediately after its stateless classification. Only separate
+`deque(maxlen=50)` raw-line tails survive for an unknown-result diagnostic, so
+classification memory does not grow with output length and the files are not
+read again to produce tails. The stdout scan stops at its first decisive line.
 
 | Class | Recognized variants | Action |
 |---|---|---|
@@ -99,6 +121,14 @@ Raw Codex exit codes never escape. The stderr JSON reports the true value in
 `codex_exit`; wrapper-private exits 73–76 must not be reinterpreted as Codex
 statuses.
 
+On exit 71, the Bash trap moves the private run directory to
+`${KIMI_PROOF_ROOT:-$HOME/.cache/kimi-proof}/$SESSION_ID/codex-with-rotation-failures/<timestamp>/`
+with mode 0700 and prints the retained path. These diagnostics can contain copied
+credentials and task input; `wrapper-error.log` records the internal causal
+chain with mode 0600. If the move cannot be completed, the mode-0700 run
+directory remains under `~/tmp/` and its path is printed instead. Inspect the
+directory privately and remove it afterward.
+
 ## Environment
 
 - `CODEX_KIMI_FORCE=1` initializes/validates state, does not launch Codex, emits
@@ -128,11 +158,24 @@ is required after a refresh token expires.
 ## Enforcement-marker boundary
 
 `codex-issue-marker` writes one-use, 600-second capability files consumed by
-`codex-first-gate.sh`. These markers are not cryptographically authenticated.
-They guard against accidental Kimi-quota consumption, not a hostile process
-running as the same Unix user.
+`codex-first-gate.sh`. Both resolve their root through `KIMI_PROOF_ROOT` with the
+same default as `hooks/lib/kimi-proof-state.sh`. Approved orchestration roles
+come only from `~/.kimi-code/lib/codex-roles.txt`.
+
+Markers are session-scoped capability tokens, not task-bound authorizations; they defend against accidental Kimi-quota consumption, not against orchestrator bugs or hostile same-UID processes. An orchestrator that issues a marker for task A and then calls Agent for unrelated task B will consume the marker on B.
+
+Delegated worker execution (code, research, and reviews) runs through
+codex-via-Bash. Kimi orchestration primitives (`Agent`, `AgentSwarm`,
+`TaskOutput`, and `TaskStop`) still manage ECI/ATE role lifecycle. The two
+coexist: Codex performs delegated work while Kimi manages workflow state. An ECI
+orchestrator can issue the `critic-step2` marker and spawn that role; the spawned
+critic can then use codex-via-Bash for its analysis.
 
 ## Verification caveats
+
+The real `codex-cli 0.144.6` hash/stat run is recorded in
+[`codex-with-rotation-poc.md`](codex-with-rotation-poc.md). It completed on the
+first attempt and reported identical before/after pool manifests.
 
 - Live quota and cyber JSONL wire shapes remain unverified. Classification is
   covered by synthetic fixtures and fails closed on anything unmatched.

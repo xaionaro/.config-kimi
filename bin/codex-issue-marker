@@ -2,7 +2,29 @@
 set -euo pipefail
 
 program=${0##*/}
-roles=' critic-step2 critic-A critic-B e2e-gate brainstormer loop-breaker brp-feasibility-validator '
+script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -P -- "$script_dir/.." && pwd)
+roles_file=$repo_root/lib/codex-roles.txt
+proof_library=$repo_root/hooks/lib/kimi-proof-state.sh
+
+fail() {
+  printf '%s: %s\n' "$program" "$1" >&2
+  exit 2
+}
+
+[[ -f $roles_file && ! -L $roles_file ]] || fail 'role source is missing or unsafe'
+[[ -f $proof_library && ! -L $proof_library ]] || fail 'proof-state library is missing or unsafe'
+# shellcheck source=../hooks/lib/kimi-proof-state.sh
+. "$proof_library"
+
+roles=()
+mapfile -t roles <"$roles_file"
+((${#roles[@]} > 0)) || fail 'role source is empty'
+role_pattern=
+for role in "${roles[@]}"; do
+  [[ $role =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || fail 'role source is invalid'
+  role_pattern+=${role_pattern:+|}$role
+done
 
 show_help() {
   cat <<'EOF'
@@ -17,22 +39,23 @@ Modes:
   --cyber <task-sig>
       Issue a marker named by a 64-character lowercase hexadecimal task_sig.
   --orchestration <role>
-      Issue a nonce marker for one approved ECI/ATE role. Allowed roles:
-      critic-step2, critic-A, critic-B, e2e-gate, brainstormer, loop-breaker,
-      brp-feasibility-validator.
+      Issue a nonce marker for one approved ECI/ATE role. Allowed roles are
+      loaded from ~/.kimi-code/lib/codex-roles.txt:
+EOF
+  local role
+  for role in "${roles[@]}"; do
+    printf '        %s\n' "$role"
+  done
+  cat <<'EOF'
 
 Session selection:
   --session <id> overrides KIMI_SESSION_ID. A session ID may contain only
   ASCII letters, digits, dot, underscore, and hyphen.
 
 The marker path is printed to stdout. Markers are claimed once by
-codex-first-gate.sh and expire after 600 seconds.
+codex-first-gate.sh and expire after 600 seconds. KIMI_PROOF_ROOT replaces the
+default ~/.cache/kimi-proof marker root.
 EOF
-}
-
-fail() {
-  printf '%s: %s\n' "$program" "$1" >&2
-  exit 2
 }
 
 sid=${KIMI_SESSION_ID:-}
@@ -68,11 +91,12 @@ done
 
 case $mode in
   --cyber)
-    [[ $value =~ ^[0-9a-f]{64}$ ]] || fail 'task_sig must be 64 lowercase hexadecimal characters'
+    [[ $value =~ ^[0-9a-f]{64}$ ]] ||
+      fail 'task_sig must be 64 lowercase hexadecimal characters'
     name=$value
     ;;
   --orchestration)
-    [[ $roles == *" $value "* ]] || fail 'invalid orchestration role'
+    [[ $value =~ ^($role_pattern)$ ]] || fail 'invalid orchestration role'
     nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
     [[ $nonce =~ ^[0-9a-f]{16}$ ]] || fail 'could not generate nonce'
     name=orchestration-$value-$nonce
@@ -83,11 +107,15 @@ case $mode in
 esac
 
 umask 077
-base=$HOME/.cache/kimi-proof
+base=$(kimi_proof_root)
 session_dir=$base/$sid
 dir=$session_dir/cyber-escalation
+[[ $base == /* && $base != / ]] || fail 'proof root must be an absolute non-root path'
+[[ ! -L $base && ! -L $session_dir && ! -L $dir ]] ||
+  fail 'marker directory must not be a symlink'
 mkdir -p -- "$dir"
-[[ ! -L $base && ! -L $session_dir && ! -L $dir ]] || fail 'marker directory must not be a symlink'
+[[ ! -L $base && ! -L $session_dir && ! -L $dir ]] ||
+  fail 'marker directory must not be a symlink'
 chmod 700 -- "$base" "$session_dir" "$dir"
 
 exec {dfd}<"$dir"

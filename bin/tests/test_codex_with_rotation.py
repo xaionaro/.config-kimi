@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -18,9 +19,22 @@ from typing import Any
 
 
 BIN_DIR = Path(__file__).resolve().parents[1]
-WRAPPER = Path(os.environ.get("CODEX_ROTATION_WRAPPER", BIN_DIR / "codex-with-rotation"))
+WRAPPER = Path(
+    os.environ.get("CODEX_ROTATION_WRAPPER", BIN_DIR / "codex-with-rotation")
+)
+CLASSIFIER = Path(
+    os.environ.get(
+        "CODEX_ROTATION_CLASSIFIER", BIN_DIR / "codex-with-rotation-classify"
+    )
+)
 MARKER = Path(os.environ.get("CODEX_ISSUE_MARKER", BIN_DIR / "codex-issue-marker"))
 GATE = BIN_DIR.parent / "hooks" / "codex-first-gate.sh"
+BOOTSTRAP = BIN_DIR / "bootstrap-config"
+ROLES_FILE = BIN_DIR.parent / "lib" / "codex-roles.txt"
+RUNNER = BIN_DIR.parent / "hooks" / "tests" / "run.sh"
+CONFIG_TEMPLATE = BIN_DIR.parent / "config.example.toml"
+DOC = BIN_DIR.parent / "docs" / "codex-with-rotation.md"
+AGENTS = BIN_DIR.parent / "AGENTS.md"
 
 POOL_NAMES = ("auth.json", "auth.json-danusya", "auth.json-xaionaro")
 CYBER_VARIANTS = (
@@ -192,7 +206,10 @@ def utc_text(value: datetime) -> str:
 
 
 class WrapperFixture:
-    def __init__(self, accounts: tuple[str, ...] = ("account-a", "account-b", "account-c")) -> None:
+    def __init__(
+        self,
+        accounts: tuple[str, ...] = ("account-a", "account-b", "account-c"),
+    ) -> None:
         scratch_root = Path.home() / "tmp"
         scratch_root.mkdir(parents=True, exist_ok=True)
         self._temporary = tempfile.TemporaryDirectory(
@@ -250,12 +267,14 @@ class WrapperFixture:
         *,
         stdin: bytes = b"task",
         arguments: tuple[str, ...] = (),
+        label: str | None = None,
         extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self.set_plan(responses)
         return self.run_existing_plan(
             stdin=stdin,
             arguments=arguments,
+            label=label,
             extra_environment=extra_environment,
         )
 
@@ -264,10 +283,15 @@ class WrapperFixture:
         *,
         stdin: bytes = b"task",
         arguments: tuple[str, ...] = (),
+        label: str | None = None,
         extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        command = [str(WRAPPER)]
+        if label is not None:
+            command.extend(("--label", label))
+        command.extend(("--", *arguments))
         return subprocess.run(
-            [str(WRAPPER), "--", *arguments],
+            command,
             input=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -325,6 +349,112 @@ class TaskSignatureTests(WrapperTestCase):
             invocation["argv"], ["exec", "--ephemeral", "--json", *arguments]
         )
 
+    def test_label_is_reported_without_changing_task_signature(self) -> None:
+        fixture = self.fixture()
+        stdin = b"labelled task"
+        arguments = ("--sandbox", "read-only")
+
+        result = fixture.run(
+            [success_response()],
+            stdin=stdin,
+            arguments=arguments,
+            label="critic-B correlation",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = status_from(result)
+        self.assertEqual(status["label"], "critic-B correlation")
+        self.assertEqual(status["task_sig"], exact_task_sig(stdin, arguments))
+
+
+class ClassifierProcessTests(WrapperTestCase):
+    def test_classifier_is_executable_sibling_without_embedded_heredoc(self) -> None:
+        self.assertTrue(CLASSIFIER.is_file())
+        self.assertEqual(stat.S_IMODE(CLASSIFIER.stat().st_mode), 0o755)
+        self.assertEqual(
+            CLASSIFIER.read_text(encoding="utf-8").splitlines()[0],
+            "#!/usr/bin/env python3",
+        )
+        wrapper_text = WRAPPER.read_text(encoding="utf-8")
+        self.assertNotIn("<<'PY'", wrapper_text)
+        self.assertIn("codex-with-rotation-classify", wrapper_text)
+
+    def test_streaming_classification_of_100k_lines_stays_below_50_mib(self) -> None:
+        fixture = self.fixture()
+        stdout_path = fixture.root / "large.stdout.jsonl"
+        stderr_path = fixture.root / "large.stderr.log"
+        rss_path = fixture.root / "classifier.max-rss-kib"
+        line = b'{"type":"turn.completed","result":"bounded"}\n'
+        with stdout_path.open("wb") as stream:
+            for _index in range(100_000):
+                stream.write(line)
+        stderr_path.write_bytes(b"")
+
+        result = subprocess.run(
+            [
+                "/usr/bin/time",
+                "-f",
+                "%M",
+                "-o",
+                str(rss_path),
+                sys.executable,
+                str(CLASSIFIER),
+                "classify",
+                str(stdout_path),
+                str(stderr_path),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["class"], "unknown")
+        self.assertEqual(summary["stdout_tail_lines"], 50)
+        self.assertEqual(summary["stderr_tail_lines"], 0)
+        peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
+        self.assertLess(peak_rss_kib, 50 * 1024)
+
+    def test_streaming_classification_stops_at_first_decisive_line(self) -> None:
+        fixture = self.fixture()
+        stdout_path = fixture.root / "decisive.stdout.jsonl"
+        stderr_path = fixture.root / "decisive.stderr.log"
+        stdout_path.write_text(
+            "\n".join(
+                (
+                    '{"type":"turn.failed","error":{"code":"QuotaExceeded"}}',
+                    "not-json-after-decision",
+                    '{"type":"turn.failed","error":{"kind":"CyberPolicyResponse"}}',
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr_path.write_bytes(b"")
+
+        result = subprocess.run(
+            [
+                str(CLASSIFIER),
+                "classify",
+                str(stdout_path),
+                str(stderr_path),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["class"], "quota")
+        self.assertFalse(summary["has_malformed_line"])
+        self.assertEqual(summary["stdout_tail_lines"], 1)
+
 
 class ClassificationTests(WrapperTestCase):
     def test_every_cyber_variant_in_both_casings_retries_same_account(self) -> None:
@@ -350,7 +480,9 @@ class ClassificationTests(WrapperTestCase):
                             "type": "error",
                             "detail": {"type": variant, field: "Policy BLOCK decision"},
                         }
-                        result = fixture.run([event_response(event), success_response()])
+                        result = fixture.run(
+                            [event_response(event), success_response()]
+                        )
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(
                             [call["account_id"] for call in fixture.invocations()],
@@ -419,14 +551,16 @@ class ClassificationTests(WrapperTestCase):
 
     def test_malformed_line_fails_closed_with_raw_tail(self) -> None:
         fixture = self.fixture()
-        result = fixture.run([{"stdout": ["not-json"], "stderr": "raw-error", "exit": 4}])
+        result = fixture.run(
+            [{"stdout": ["not-json"], "stderr": "raw-error", "exit": 4}]
+        )
 
         self.assertEqual(result.returncode, 76)
         self.assertEqual(status_from(result)["class"], "unknown")
         self.assertIn(b"not-json", result.stderr)
         self.assertIn(b"raw-error", result.stderr)
 
-    def test_mixed_stream_obeys_local_then_cyber_then_quota_precedence(self) -> None:
+    def test_mixed_event_obeys_local_then_cyber_then_quota_precedence(self) -> None:
         local_fixture = self.fixture()
         local_event = {
             "type": "turn.failed",
@@ -460,6 +594,9 @@ class RotationStateMachineTests(WrapperTestCase):
             name: stat.S_IMODE((fixture.state_dir / name).stat().st_mode)
             for name in POOL_NAMES
         }
+        before_bytes = {
+            name: (fixture.state_dir / name).read_bytes() for name in POOL_NAMES
+        }
         quota = event_response(
             {"type": "turn.failed", "error": {"code": "QuotaExceeded"}}
         )
@@ -480,6 +617,50 @@ class RotationStateMachineTests(WrapperTestCase):
                 for name in POOL_NAMES
             },
         )
+        self.assertEqual(
+            before_bytes,
+            {name: (fixture.state_dir / name).read_bytes() for name in POOL_NAMES},
+        )
+
+    def test_state_writes_prune_expired_cooldowns_and_cyber_tasks(self) -> None:
+        fixture = self.fixture()
+        self.assertEqual(fixture.initialize_state().returncode, 75)
+        state = fixture.state()
+        now = datetime.now(timezone.utc)
+        state["cooldowns"]["expired-account"] = {
+            "until_utc": utc_text(now - timedelta(seconds=1)),
+            "variant": "fixture",
+            "observed_utc": utc_text(now - timedelta(seconds=601)),
+        }
+        state["cooldowns"]["fresh-account"] = {
+            "until_utc": utc_text(now + timedelta(seconds=600)),
+            "variant": "fixture",
+            "observed_utc": utc_text(now),
+        }
+        state["cyber_streaks"]["tasks"]["expired-task"] = {
+            "count": 1,
+            "last_observed_utc": utc_text(now - timedelta(seconds=601)),
+            "variant": "CyberPolicyResponse",
+        }
+        state["cyber_streaks"]["tasks"]["fresh-task"] = {
+            "count": 1,
+            "last_observed_utc": utc_text(now),
+            "variant": "CyberPolicyResponse",
+        }
+        fixture.replace_state(state)
+        quota = event_response(
+            {"type": "turn.failed", "error": {"code": "QuotaExceeded"}}
+        )
+
+        result = fixture.run([quota, success_response()])
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        written_state = fixture.state()
+        self.assertNotIn("expired-account", written_state["cooldowns"])
+        self.assertIn("fresh-account", written_state["cooldowns"])
+        tasks = written_state["cyber_streaks"]["tasks"]
+        self.assertNotIn("expired-task", tasks)
+        self.assertIn("fresh-task", tasks)
 
     def test_all_alternative_accounts_cooling_exits_72(self) -> None:
         fixture = self.fixture()
@@ -530,7 +711,9 @@ class RotationStateMachineTests(WrapperTestCase):
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline and not signal.exists():
                 time.sleep(0.01)
-            self.assertTrue(signal.exists(), "mock Codex did not reach synchronization point")
+            self.assertTrue(
+                signal.exists(), "mock Codex did not reach synchronization point"
+            )
             state = fixture.state()
             state["active_account_id"] = "account-b"
             fixture.replace_state(state)
@@ -576,8 +759,9 @@ class CyberStreakTests(WrapperTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         status = status_from(result)
         self.assertEqual(status["attempts"], 2)
-        task = fixture.state()["cyber_streaks"]["tasks"][status["task_sig"]]
-        self.assertEqual(task["count"], 0)
+        self.assertNotIn(
+            status["task_sig"], fixture.state()["cyber_streaks"]["tasks"]
+        )
 
     def test_second_hit_within_window_exits_75(self) -> None:
         fixture = self.fixture()
@@ -611,9 +795,7 @@ class CyberStreakTests(WrapperTestCase):
         result = fixture.run([local, local], stdin=stdin)
 
         self.assertEqual(result.returncode, 73)
-        self.assertEqual(
-            fixture.state()["cyber_streaks"]["tasks"][task_sig]["count"], 0
-        )
+        self.assertNotIn(task_sig, fixture.state()["cyber_streaks"]["tasks"])
 
     def test_streak_older_than_600_seconds_restarts_at_one(self) -> None:
         fixture = self.fixture()
@@ -636,9 +818,7 @@ class CyberStreakTests(WrapperTestCase):
         result = fixture.run([cyber, success_response()], stdin=stdin)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            fixture.state()["cyber_streaks"]["tasks"][task_sig]["count"], 0
-        )
+        self.assertNotIn(task_sig, fixture.state()["cyber_streaks"]["tasks"])
 
 
 class LocalHookTests(WrapperTestCase):
@@ -745,6 +925,58 @@ class ExitCodeTests(WrapperTestCase):
         )
         self.assert_status(unknown_fixture.run([unknown]), 76, "unknown")
 
+    def test_exit_71_preserves_private_diagnostics_and_reports_path(self) -> None:
+        fixture = self.fixture()
+        (fixture.state_dir / "config.toml").unlink()
+        proof_root = fixture.root / "proof-root"
+
+        result = fixture.run(
+            [success_response()],
+            extra_environment={
+                "SESSION_ID": "diagnostic-session",
+                "KIMI_PROOF_ROOT": str(proof_root),
+            },
+        )
+
+        self.assertEqual(result.returncode, 71, result.stderr)
+        failures = (
+            proof_root
+            / "diagnostic-session"
+            / "codex-with-rotation-failures"
+        )
+        preserved = list(failures.iterdir()) if failures.is_dir() else []
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual(stat.S_IMODE(preserved[0].stat().st_mode), 0o700)
+        self.assertTrue(any(preserved[0].glob("attempt-1.*")))
+        reason_path = preserved[0] / "wrapper-error.log"
+        self.assertEqual(stat.S_IMODE(reason_path.stat().st_mode), 0o600)
+        self.assertIn(
+            "source config.toml or hooks directory is missing",
+            reason_path.read_text(encoding="utf-8"),
+        )
+        self.assertIn(os.fsencode(preserved[0]), result.stderr)
+        remaining = list((fixture.home / "tmp").glob("codex-with-rotation.*"))
+        self.assertEqual(remaining, [])
+
+    def test_exit_71_keeps_private_tmp_diagnostics_if_move_fails(self) -> None:
+        fixture = self.fixture()
+        (fixture.state_dir / "config.toml").unlink()
+
+        result = fixture.run(
+            [success_response()],
+            extra_environment={
+                "SESSION_ID": "diagnostic-fallback-session",
+                "KIMI_PROOF_ROOT": "/",
+            },
+        )
+
+        self.assertEqual(result.returncode, 71, result.stderr)
+        remaining = list((fixture.home / "tmp").glob("codex-with-rotation.*"))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(stat.S_IMODE(remaining[0].stat().st_mode), 0o700)
+        self.assertTrue((remaining[0] / "wrapper-error.log").is_file())
+        self.assertIn(os.fsencode(remaining[0]), result.stderr)
+
 
 class AtomicityTests(WrapperTestCase):
     def test_parallel_quota_failures_do_not_double_rotate(self) -> None:
@@ -779,8 +1011,12 @@ class MarkerIssuerTests(WrapperTestCase):
         fixture: WrapperFixture,
         *arguments: str,
         session_id: str = "session-test",
+        extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        environment = fixture.environment({"KIMI_SESSION_ID": session_id})
+        overrides = {"KIMI_SESSION_ID": session_id}
+        if extra_environment:
+            overrides.update(extra_environment)
+        environment = fixture.environment(overrides)
         return subprocess.run(
             [str(MARKER), *arguments],
             text=True,
@@ -827,20 +1063,110 @@ class MarkerIssuerTests(WrapperTestCase):
         self.assertEqual(results[0].stdout.strip(), results[1].stdout.strip())
         self.assertTrue(Path(results[0].stdout.strip()).is_file())
 
+    def test_marker_honors_kimi_proof_root(self) -> None:
+        fixture = self.fixture()
+        proof_root = fixture.root / "test-proof"
 
-class GateTests(WrapperTestCase):
-    def run_gate(
-        self, fixture: WrapperFixture, session_id: str
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(GATE)],
-            input=json.dumps({"session_id": session_id}),
+        result = self.run_marker(
+            fixture,
+            "--cyber",
+            "c" * 64,
+            extra_environment={"KIMI_PROOF_ROOT": str(proof_root)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        marker_path = Path(result.stdout.strip())
+        self.assertTrue(marker_path.is_relative_to(proof_root))
+        self.assertTrue(marker_path.is_file())
+        allowed = GateTests.run_gate_for_fixture(
+            fixture,
+            "session-test",
+            extra_environment={"KIMI_PROOF_ROOT": str(proof_root)},
+        )
+        self.assertEqual(allowed.returncode, 0)
+        self.assertEqual(allowed.stdout, "")
+        self.assertFalse(marker_path.exists())
+
+    def test_role_file_drives_issuer_help_and_gate_acceptance(self) -> None:
+        fixture = self.fixture()
+        roles = ROLES_FILE.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(roles), 7)
+        self.assertEqual(len(set(roles)), len(roles))
+        self.assertTrue(
+            all(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", role)
+                for role in roles
+            )
+        )
+
+        issuer_text = MARKER.read_text(encoding="utf-8")
+        gate_text = GATE.read_text(encoding="utf-8")
+        self.assertIn("codex-roles.txt", issuer_text)
+        self.assertIn("codex-roles.txt", gate_text)
+        for role in roles:
+            self.assertNotIn(role, issuer_text)
+            self.assertNotIn(role, gate_text)
+
+            session_id = f"role-{role}"
+            marker = self.run_marker(
+                fixture,
+                "--orchestration",
+                role,
+                session_id=session_id,
+            )
+            self.assertEqual(marker.returncode, 0, marker.stderr)
+            allowed = GateTests.run_gate_for_fixture(fixture, session_id)
+            self.assertEqual(allowed.returncode, 0)
+            self.assertEqual(allowed.stdout, "")
+
+        help_result = subprocess.run(
+            [str(MARKER), "--help"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=fixture.environment(),
             timeout=10,
             check=False,
+        )
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertTrue(all(role in help_result.stdout for role in roles))
+
+
+class GateTests(WrapperTestCase):
+    @staticmethod
+    def run_gate_for_fixture(
+        fixture: WrapperFixture,
+        session_id: str,
+        *,
+        payload: JsonObject | None = None,
+        extra_environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        gate_input = {"session_id": session_id}
+        if payload:
+            gate_input.update(payload)
+        return subprocess.run(
+            [str(GATE)],
+            input=json.dumps(gate_input),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=fixture.environment(extra_environment),
+            timeout=10,
+            check=False,
+        )
+
+    def run_gate(
+        self,
+        fixture: WrapperFixture,
+        session_id: str,
+        *,
+        payload: JsonObject | None = None,
+        extra_environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_gate_for_fixture(
+            fixture,
+            session_id,
+            payload=payload,
+            extra_environment=extra_environment,
         )
 
     def test_gate_denies_without_marker_and_claims_marker_once(self) -> None:
@@ -883,6 +1209,114 @@ class GateTests(WrapperTestCase):
             ],
             "deny",
         )
+
+    def test_cyber_marker_authorizes_an_unrelated_agent_call(self) -> None:
+        fixture = self.fixture()
+        session_id = "unrelated-agent-session"
+        marker_result = subprocess.run(
+            [str(MARKER), "--session", session_id, "--cyber", "d" * 64],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=fixture.environment(),
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
+        marker_path = Path(marker_result.stdout.strip())
+
+        unrelated = self.run_gate(
+            fixture,
+            session_id,
+            payload={
+                "tool_name": "Agent",
+                "tool_input": {
+                    "description": "unrelated task B",
+                    "subagent_type": "coder",
+                },
+            },
+        )
+
+        self.assertEqual(unrelated.returncode, 0)
+        self.assertEqual(unrelated.stdout, "")
+        self.assertFalse(marker_path.exists())
+
+
+class BootstrapIntegrationTests(WrapperTestCase):
+    def run_bootstrap(
+        self,
+        fixture: WrapperFixture,
+        data_root: Path,
+        *arguments: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(BOOTSTRAP), *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=fixture.environment({"KIMI_CODE_HOME": str(data_root)}),
+            timeout=10,
+            check=False,
+        )
+
+    def test_template_and_existing_config_receive_gate_hook_once(self) -> None:
+        fixture = self.fixture()
+        stanza_marker = "codex-first-gate.sh"
+        template_text = CONFIG_TEMPLATE.read_text(encoding="utf-8")
+        self.assertEqual(template_text.count(stanza_marker), 1)
+
+        data_root = fixture.root / "bootstrap-existing"
+        data_root.mkdir(mode=0o755)
+        config_path = data_root / "config.toml"
+        original = b"# local configuration\n[local]\nenabled = true\n"
+        config_path.write_bytes(original)
+        config_path.chmod(0o644)
+
+        first = self.run_bootstrap(fixture, data_root)
+        second = self.run_bootstrap(fixture, data_root)
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        materialized = config_path.read_bytes()
+        self.assertTrue(materialized.startswith(original))
+        self.assertEqual(materialized.count(stanza_marker.encode()), 1)
+        self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
+
+    def test_help_describes_materialization_without_writing_config(self) -> None:
+        fixture = self.fixture()
+        data_root = fixture.root / "bootstrap-help"
+        data_root.mkdir(mode=0o755)
+
+        result = self.run_bootstrap(fixture, data_root, "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Usage:", result.stdout)
+        self.assertFalse((data_root / "config.toml").exists())
+
+
+class RepositoryContractTests(WrapperTestCase):
+    def test_runner_invokes_codex_rotation_suite(self) -> None:
+        runner_text = RUNNER.read_text(encoding="utf-8")
+        self.assertIn(
+            'python3 "$ROOT/bin/tests/test_codex_with_rotation.py"', runner_text
+        )
+
+    def test_capability_boundary_is_documented_exactly(self) -> None:
+        limitation = (
+            "Markers are session-scoped capability tokens, not task-bound "
+            "authorizations; they defend against accidental Kimi-quota "
+            "consumption, not against orchestrator bugs or hostile same-UID "
+            "processes. An orchestrator that issues a marker for task A and "
+            "then calls Agent for unrelated task B will consume the marker on B."
+        )
+        self.assertIn(limitation, AGENTS.read_text(encoding="utf-8"))
+        self.assertIn(limitation, DOC.read_text(encoding="utf-8"))
+
+    def test_agents_distinguishes_worker_execution_from_orchestration(self) -> None:
+        agents_text = AGENTS.read_text(encoding="utf-8")
+        self.assertIn("Delegated worker execution", agents_text)
+        self.assertIn("Kimi orchestration primitives", agents_text)
+        self.assertIn("lib/codex-roles.txt", agents_text)
 
 
 if __name__ == "__main__":

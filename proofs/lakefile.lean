@@ -7,6 +7,7 @@ lean_lib StopEci where
 
 lean_lib KimiHooksProofs where
   roots := #[`Spec.OwnedProcessGroup, `Proofs.OwnedProcessGroup,
+    `Spec.CodexRotation, `Proofs.CodexRotation,
     `Spec.PruneTurnState, `Spec.TurnCapture, `Spec.Utf8Prefix,
     `Spec.PreReviewerController, `Proofs.PruneTurnState, `Proofs.TurnCapture,
     `Proofs.Utf8Prefix, `Proofs.PreReviewerController]
@@ -30,3 +31,6 @@ lean_exe preReviewerControllerDiff where
 @[default_target]
 lean_exe ownedProcessGroupDiff where
   root := `DiffTest.OwnedProcessGroupMain
+
+lean_exe codexRotationDiff where
+  root := `DiffTest.CodexRotationMain
