@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import tomllib
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,6 +56,24 @@ QUOTA_VARIANTS = (
     "UsageNotIncluded",
     "usage_not_included",
 )
+DENYING_GUARDIAN_RISK_LEVELS = ("high", "critical", "severe")
+INVALID_SESSION_IDS = (".", "..", "../etc", "foo/../bar", "foo/", "/etc")
+VALID_SESSION_ID = "session_2676a827-b749-44d6-a0f1-a8bd175e5b13"
+CAPABILITY_TOKEN_LIMITATION = (
+    "Markers are session-scoped capability tokens, not task-bound "
+    "authorizations; they defend against accidental Kimi-quota consumption, "
+    "not against orchestrator bugs or hostile same-UID processes. An "
+    "orchestrator that issues a marker for task A and then calls Agent for "
+    "unrelated task B will consume the marker on B."
+)
+CORRECT_GATE_STANZA = textwrap.dedent(
+    """
+    [[hooks]]
+    event = "PreToolUse"
+    matcher = "^(Agent|AgentSwarm)$"
+    command = "codex-first-gate.sh"
+    """
+).lstrip()
 
 JsonObject = dict[str, Any]
 
@@ -180,6 +199,38 @@ def event_response(event: JsonObject, *, exit_code: int = 9) -> JsonObject:
 
 def success_response() -> JsonObject:
     return {"stdout": [{"type": "turn.completed", "result": "ok"}], "exit": 0}
+
+
+def run_classifier(
+    fixture: WrapperFixture,
+    stdout_lines: tuple[JsonObject | str, ...],
+    *,
+    stderr_lines: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    stdout_path = fixture.root / "classifier.stdout.jsonl"
+    stderr_path = fixture.root / "classifier.stderr.log"
+    stdout_path.write_text(
+        "\n".join(
+            line
+            if isinstance(line, str)
+            else json.dumps(line, separators=(",", ":"))
+            for line in stdout_lines
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stderr_path.write_text(
+        "\n".join(stderr_lines) + ("\n" if stderr_lines else ""),
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        [str(CLASSIFIER), "classify", str(stdout_path), str(stderr_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
 
 
 def status_from(result: subprocess.CompletedProcess[bytes]) -> JsonObject:
@@ -418,7 +469,7 @@ class ClassifierProcessTests(WrapperTestCase):
         peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
         self.assertLess(peak_rss_kib, 50 * 1024)
 
-    def test_streaming_classification_stops_at_first_decisive_line(self) -> None:
+    def test_streaming_classification_consumes_the_full_stream(self) -> None:
         fixture = self.fixture()
         stdout_path = fixture.root / "decisive.stdout.jsonl"
         stderr_path = fixture.root / "decisive.stderr.log"
@@ -451,12 +502,61 @@ class ClassifierProcessTests(WrapperTestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = json.loads(result.stdout)
-        self.assertEqual(summary["class"], "quota")
-        self.assertFalse(summary["has_malformed_line"])
-        self.assertEqual(summary["stdout_tail_lines"], 1)
+        self.assertEqual(summary["class"], "cyber")
+        self.assertTrue(summary["has_malformed_line"])
+        self.assertEqual(summary["stdout_tail_lines"], 3)
+
+    def test_stderr_local_hook_still_consumes_the_stdout_stream(self) -> None:
+        fixture = self.fixture()
+        quota = {"type": "turn.failed", "error": {"code": "QuotaExceeded"}}
+        cyber = {
+            "type": "turn.failed",
+            "error": {"kind": "CyberPolicyResponse"},
+        }
+
+        result = run_classifier(
+            fixture,
+            (quota, "not-json", cyber),
+            stderr_lines=(
+                "before marker",
+                "Command blocked by PreToolUse hook: fixture",
+                "after marker",
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["class"], "local_hook_deny")
+        self.assertTrue(summary["has_malformed_line"])
+        self.assertEqual(summary["stdout_tail_lines"], 3)
+        self.assertEqual(summary["stderr_tail_lines"], 3)
 
 
 class ClassificationTests(WrapperTestCase):
+    def test_stream_precedence_is_independent_of_arrival_order(self) -> None:
+        quota = {"type": "turn.failed", "error": {"code": "QuotaExceeded"}}
+        cyber = {
+            "type": "turn.failed",
+            "error": {"kind": "CyberPolicyResponse"},
+        }
+        local = {"item": {"type": "approval_denied"}}
+        cases = (
+            ((quota, cyber), "cyber"),
+            ((cyber, quota), "cyber"),
+            ((quota, local), "local_hook_deny"),
+            ((local, quota), "local_hook_deny"),
+            ((cyber, local), "local_hook_deny"),
+            ((local, cyber), "local_hook_deny"),
+        )
+
+        for events, expected_class in cases:
+            with self.subTest(events=events, expected_class=expected_class):
+                fixture = self.fixture()
+                result = run_classifier(fixture, events)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["class"], expected_class)
+
     def test_every_cyber_variant_in_both_casings_retries_same_account(self) -> None:
         for canonical in CYBER_VARIANTS:
             for variant in (canonical, canonical.upper()):
@@ -488,6 +588,44 @@ class ClassificationTests(WrapperTestCase):
                             [call["account_id"] for call in fixture.invocations()],
                             ["account-a", "account-a"],
                         )
+
+    def test_guardian_denying_risk_level_only_is_cyber(self) -> None:
+        for risk_level in DENYING_GUARDIAN_RISK_LEVELS:
+            with self.subTest(risk_level=risk_level):
+                fixture = self.fixture()
+                event = {
+                    "type": "turn.failed",
+                    "detail": {
+                        "type": "GuardianAssessmentEvent",
+                        "risk_level": risk_level,
+                    },
+                }
+
+                result = fixture.run([event_response(event), success_response()])
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    [call["account_id"] for call in fixture.invocations()],
+                    ["account-a", "account-a"],
+                )
+
+    def test_guardian_low_risk_level_only_is_unknown(self) -> None:
+        fixture = self.fixture()
+        event = {
+            "type": "turn.failed",
+            "detail": {
+                "type": "guardian_assessment_event",
+                "risk_level": "low",
+            },
+        }
+
+        result = fixture.run([event_response(event)])
+
+        self.assertEqual(result.returncode, 76, result.stderr)
+        self.assertEqual(status_from(result)["class"], "unknown")
+        self.assertEqual(
+            [call["account_id"] for call in fixture.invocations()], ["account-a"]
+        )
 
     def test_every_quota_variant_in_both_casings_rotates(self) -> None:
         for canonical in QUOTA_VARIANTS:
@@ -727,6 +865,38 @@ class RotationStateMachineTests(WrapperTestCase):
             ["account-a", "account-b"],
         )
 
+    def test_cyber_retry_keeps_pinned_account_during_concurrent_rotation(self) -> None:
+        fixture = self.fixture()
+        self.assertEqual(fixture.initialize_state().returncode, 75)
+        signal = fixture.root / "cyber-started"
+        release = fixture.root / "release-cyber"
+        cyber = event_response(
+            {"type": "turn.failed", "error": {"kind": "CyberPolicyResponse"}}
+        )
+        cyber.update({"signal": str(signal), "wait_for": str(release)})
+        fixture.set_plan([cyber, success_response()])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fixture.run_existing_plan)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not signal.exists():
+                time.sleep(0.01)
+            self.assertTrue(
+                signal.exists(), "mock Codex did not reach synchronization point"
+            )
+            state = fixture.state()
+            state["active_account_id"] = "account-b"
+            fixture.replace_state(state)
+            release.touch()
+            result = future.result(timeout=12)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fixture.state()["active_account_id"], "account-b")
+        self.assertEqual(
+            [call["account_id"] for call in fixture.invocations()],
+            ["account-a", "account-a"],
+        )
+
     def test_wraparound_moves_last_account_to_first(self) -> None:
         fixture = self.fixture()
         self.assertEqual(fixture.initialize_state().returncode, 75)
@@ -927,31 +1097,52 @@ class ExitCodeTests(WrapperTestCase):
 
     def test_exit_71_preserves_private_diagnostics_and_reports_path(self) -> None:
         fixture = self.fixture()
-        (fixture.state_dir / "config.toml").unlink()
+        hook_path = fixture.state_dir / "hooks" / "pre-tool.sh"
+        hook_path.write_text("hook fixture\n", encoding="utf-8")
+        plugins_path = fixture.state_dir / "plugins"
+        plugins_path.mkdir()
+        plugin_path = plugins_path / "plugin.toml"
+        plugin_path.write_text("plugin fixture\n", encoding="utf-8")
+        (fixture.fake_bin / "codex").unlink()
         proof_root = fixture.root / "proof-root"
 
         result = fixture.run(
             [success_response()],
             extra_environment={
-                "SESSION_ID": "diagnostic-session",
+                "SESSION_ID": VALID_SESSION_ID,
                 "KIMI_PROOF_ROOT": str(proof_root),
+                "PATH": "/usr/bin:/bin",
             },
         )
 
         self.assertEqual(result.returncode, 71, result.stderr)
         failures = (
             proof_root
-            / "diagnostic-session"
+            / VALID_SESSION_ID
             / "codex-with-rotation-failures"
         )
         preserved = list(failures.iterdir()) if failures.is_dir() else []
         self.assertEqual(len(preserved), 1)
         self.assertEqual(stat.S_IMODE(preserved[0].stat().st_mode), 0o700)
-        self.assertTrue(any(preserved[0].glob("attempt-1.*")))
+        attempts = list(preserved[0].glob("attempt-1.*"))
+        self.assertEqual(len(attempts), 1)
+        attempt_home = attempts[0]
+        self.assertEqual(stat.S_IMODE(attempt_home.stat().st_mode), 0o700)
+        for directory in (attempt_home / "hooks", attempt_home / "plugins"):
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        for private_file in (
+            attempt_home / "auth.json",
+            attempt_home / "config.toml",
+            attempt_home / "hooks" / hook_path.name,
+            attempt_home / "plugins" / plugin_path.name,
+        ):
+            self.assertTrue(private_file.is_file())
+            self.assertEqual(stat.S_IMODE(private_file.stat().st_mode), 0o600)
         reason_path = preserved[0] / "wrapper-error.log"
         self.assertEqual(stat.S_IMODE(reason_path.stat().st_mode), 0o600)
         self.assertIn(
-            "source config.toml or hooks directory is missing",
+            "could not launch Codex",
             reason_path.read_text(encoding="utf-8"),
         )
         self.assertIn(os.fsencode(preserved[0]), result.stderr)
@@ -976,6 +1167,29 @@ class ExitCodeTests(WrapperTestCase):
         self.assertEqual(stat.S_IMODE(remaining[0].stat().st_mode), 0o700)
         self.assertTrue((remaining[0] / "wrapper-error.log").is_file())
         self.assertIn(os.fsencode(remaining[0]), result.stderr)
+
+    def test_exit_71_rejects_invalid_diagnostic_session_ids(self) -> None:
+        for session_id in INVALID_SESSION_IDS:
+            with self.subTest(session_id=session_id):
+                fixture = self.fixture()
+                (fixture.state_dir / "config.toml").unlink()
+                proof_root = fixture.root / "invalid-session-proof"
+
+                result = fixture.run(
+                    [success_response()],
+                    extra_environment={
+                        "SESSION_ID": session_id,
+                        "KIMI_PROOF_ROOT": str(proof_root),
+                    },
+                )
+
+                self.assertEqual(result.returncode, 71, result.stderr)
+                self.assertFalse(proof_root.exists())
+                remaining = list(
+                    (fixture.home / "tmp").glob("codex-with-rotation.*")
+                )
+                self.assertEqual(len(remaining), 1)
+                self.assertEqual(stat.S_IMODE(remaining[0].stat().st_mode), 0o700)
 
 
 class AtomicityTests(WrapperTestCase):
@@ -1031,12 +1245,29 @@ class MarkerIssuerTests(WrapperTestCase):
         fixture = self.fixture()
         task_sig = "a" * 64
 
-        result = self.run_marker(fixture, "--cyber", task_sig)
+        result = self.run_marker(
+            fixture, "--cyber", task_sig, session_id=VALID_SESSION_ID
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         marker_path = Path(result.stdout.strip())
         self.assertEqual(marker_path.name, task_sig)
         self.assertTrue(marker_path.is_file())
+
+    def test_invalid_session_ids_are_rejected(self) -> None:
+        for session_id in INVALID_SESSION_IDS:
+            with self.subTest(session_id=session_id):
+                fixture = self.fixture()
+
+                result = self.run_marker(
+                    fixture,
+                    "--cyber",
+                    "e" * 64,
+                    session_id=session_id,
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
 
     def test_orchestration_marker_has_role_and_64_bit_nonce(self) -> None:
         fixture = self.fixture()
@@ -1150,7 +1381,7 @@ class GateTests(WrapperTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=fixture.environment(extra_environment),
-            timeout=10,
+            timeout=20,
             check=False,
         )
 
@@ -1210,36 +1441,38 @@ class GateTests(WrapperTestCase):
             "deny",
         )
 
-    def test_cyber_marker_authorizes_an_unrelated_agent_call(self) -> None:
-        fixture = self.fixture()
-        session_id = "unrelated-agent-session"
-        marker_result = subprocess.run(
-            [str(MARKER), "--session", session_id, "--cyber", "d" * 64],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=fixture.environment(),
-            timeout=10,
-            check=False,
-        )
-        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
-        marker_path = Path(marker_result.stdout.strip())
+    def test_invalid_session_ids_cannot_claim_normalized_markers(self) -> None:
+        for session_id in INVALID_SESSION_IDS:
+            with self.subTest(session_id=session_id):
+                fixture = self.fixture()
+                proof_root = fixture.root / "gate-proof"
+                normalized_session = Path(
+                    os.path.normpath(f"{proof_root}/{session_id}")
+                )
+                marker_dir = normalized_session / "cyber-escalation"
+                marker_dir.mkdir(parents=True)
+                marker_path = marker_dir / ("f" * 64)
+                marker_path.write_text(f"{int(time.time())}\n", encoding="ascii")
 
-        unrelated = self.run_gate(
-            fixture,
-            session_id,
-            payload={
-                "tool_name": "Agent",
-                "tool_input": {
-                    "description": "unrelated task B",
-                    "subagent_type": "coder",
-                },
-            },
-        )
+                denied = self.run_gate(
+                    fixture,
+                    session_id,
+                    extra_environment={"KIMI_PROOF_ROOT": str(proof_root)},
+                )
 
-        self.assertEqual(unrelated.returncode, 0)
-        self.assertEqual(unrelated.stdout, "")
-        self.assertFalse(marker_path.exists())
+                self.assertEqual(denied.returncode, 0, denied.stderr)
+                self.assertNotEqual(
+                    denied.stdout,
+                    "",
+                    "invalid session ID claimed a normalized marker",
+                )
+                self.assertEqual(
+                    json.loads(denied.stdout)["hookSpecificOutput"][
+                        "permissionDecision"
+                    ],
+                    "deny",
+                )
+                self.assertTrue(marker_path.exists())
 
 
 class BootstrapIntegrationTests(WrapperTestCase):
@@ -1258,6 +1491,91 @@ class BootstrapIntegrationTests(WrapperTestCase):
             timeout=10,
             check=False,
         )
+
+    @staticmethod
+    def gate_hooks(config_path: Path) -> list[JsonObject]:
+        hooks = tomllib.loads(config_path.read_text(encoding="utf-8")).get(
+            "hooks", []
+        )
+        return [
+            hook
+            for hook in hooks
+            if isinstance(hook, dict)
+            and "codex-first-gate.sh" in str(hook.get("command", ""))
+        ]
+
+    def test_correct_gate_stanza_is_a_byte_for_byte_noop(self) -> None:
+        fixture = self.fixture()
+        data_root = fixture.root / "bootstrap-correct"
+        data_root.mkdir(mode=0o755)
+        config_path = data_root / "config.toml"
+        original = (
+            "# existing\r\n" + CORRECT_GATE_STANZA.replace("\n", "\r\n")
+        ).encode()
+        config_path.write_bytes(original)
+
+        result = self.run_bootstrap(fixture, data_root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config_path.read_bytes(), original)
+        self.assertEqual(len(self.gate_hooks(config_path)), 1)
+
+    def test_commented_out_gate_stanza_is_not_installed(self) -> None:
+        fixture = self.fixture()
+        data_root = fixture.root / "bootstrap-commented"
+        data_root.mkdir(mode=0o755)
+        config_path = data_root / "config.toml"
+        original = textwrap.dedent(
+            """
+            # [[hooks]]
+            # event = "PreToolUse"
+            # matcher = "^(Agent|AgentSwarm)$"
+            # command = "codex-first-gate.sh"
+            """
+        ).lstrip()
+        config_path.write_text(original, encoding="utf-8")
+
+        result = self.run_bootstrap(fixture, data_root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(config_path.read_text(encoding="utf-8").startswith(original))
+        self.assertEqual(len(self.gate_hooks(config_path)), 1)
+
+    def test_wrong_gate_matcher_is_replaced(self) -> None:
+        fixture = self.fixture()
+        data_root = fixture.root / "bootstrap-wrong-matcher"
+        data_root.mkdir(mode=0o755)
+        config_path = data_root / "config.toml"
+        config_path.write_text(
+            CORRECT_GATE_STANZA.replace(
+                "^(Agent|AgentSwarm)$", "^(Edit|Write)$"
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_bootstrap(fixture, data_root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate_hooks = self.gate_hooks(config_path)
+        self.assertEqual(len(gate_hooks), 1)
+        matcher = re.compile(str(gate_hooks[0]["matcher"]))
+        self.assertIsNotNone(matcher.fullmatch("Agent"))
+        self.assertIsNotNone(matcher.fullmatch("AgentSwarm"))
+
+    def test_duplicate_correct_gate_stanzas_are_deduplicated(self) -> None:
+        fixture = self.fixture()
+        data_root = fixture.root / "bootstrap-duplicate"
+        data_root.mkdir(mode=0o755)
+        config_path = data_root / "config.toml"
+        config_path.write_text(
+            CORRECT_GATE_STANZA + "\n" + CORRECT_GATE_STANZA,
+            encoding="utf-8",
+        )
+
+        result = self.run_bootstrap(fixture, data_root)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.gate_hooks(config_path)), 1)
 
     def test_template_and_existing_config_receive_gate_hook_once(self) -> None:
         fixture = self.fixture()
@@ -1301,16 +1619,20 @@ class RepositoryContractTests(WrapperTestCase):
             'python3 "$ROOT/bin/tests/test_codex_with_rotation.py"', runner_text
         )
 
-    def test_capability_boundary_is_documented_exactly(self) -> None:
-        limitation = (
-            "Markers are session-scoped capability tokens, not task-bound "
-            "authorizations; they defend against accidental Kimi-quota "
-            "consumption, not against orchestrator bugs or hostile same-UID "
-            "processes. An orchestrator that issues a marker for task A and "
-            "then calls Agent for unrelated task B will consume the marker on B."
+    def test_capability_token_limitation_is_documented(self) -> None:
+        help_result = subprocess.run(
+            [str(WRAPPER), "--help"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
         )
-        self.assertIn(limitation, AGENTS.read_text(encoding="utf-8"))
-        self.assertIn(limitation, DOC.read_text(encoding="utf-8"))
+
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn(CAPABILITY_TOKEN_LIMITATION, AGENTS.read_text(encoding="utf-8"))
+        self.assertIn(CAPABILITY_TOKEN_LIMITATION, DOC.read_text(encoding="utf-8"))
+        self.assertIn(CAPABILITY_TOKEN_LIMITATION, help_result.stdout)
 
     def test_agents_distinguishes_worker_execution_from_orchestration(self) -> None:
         agents_text = AGENTS.read_text(encoding="utf-8")

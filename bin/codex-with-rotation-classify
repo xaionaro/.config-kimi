@@ -34,6 +34,7 @@ CYBER_VARIANTS = {
     "high_risk_cyber_activity",
 }
 GUARDIAN_VARIANTS = {"guardianassessmentevent", "guardian_assessment_event"}
+GUARDIAN_DENY_RISK_LEVELS = {"high", "critical", "severe"}
 QUOTA_VARIANTS = {
     "usagelimitreached",
     "usage_limit_reached",
@@ -58,6 +59,20 @@ class FailureClass(str, Enum):
     UNKNOWN = "unknown"
 
 
+class RotationOutcome(str, Enum):
+    INSUFFICIENT_DISTINCT = "insufficient_distinct"
+    CHANGED_ELSEWHERE = "changed_elsewhere"
+    ROTATED = "rotated"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+
+
+CLASSIFICATION_PRECEDENCE = (
+    FailureClass.LOCAL_HOOK_DENY,
+    FailureClass.CYBER,
+    FailureClass.QUOTA,
+)
+
+
 class WrapperFailure(RuntimeError):
     """An internal condition that must be remapped to wrapper exit 71."""
 
@@ -78,6 +93,12 @@ class Classification:
     has_malformed_line: bool
     stdout_tail: tuple[bytes, ...]
     stderr_tail: tuple[bytes, ...]
+
+
+@dataclass(frozen=True)
+class RotationDecision:
+    outcome: RotationOutcome
+    next_entry: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -394,12 +415,12 @@ def rotate_after_quota(
     failed_account_id: str,
     variant: str,
     observed: datetime,
-) -> str:
+) -> RotationDecision:
     with state_lock(lock_path, exclusive=True):
         state_data = read_state_unlocked(state_path)
         pool = state_data["pool"]
         if len(pool) < 2:
-            return "insufficient_distinct"
+            return RotationDecision(RotationOutcome.INSUFFICIENT_DISTINCT)
 
         state_data["cooldowns"][failed_account_id] = {
             "until_utc": format_utc(observed + timedelta(seconds=COOLDOWN_SECONDS)),
@@ -408,8 +429,18 @@ def rotate_after_quota(
         }
 
         if state_data["active_account_id"] != failed_account_id:
+            next_entry = next(
+                (
+                    dict(entry)
+                    for entry in pool
+                    if entry["account_id"] == state_data["active_account_id"]
+                ),
+                None,
+            )
+            if next_entry is None:
+                raise WrapperFailure("concurrently selected account disappeared")
             atomic_write_state(state_path, state_data)
-            return "changed_elsewhere"
+            return RotationDecision(RotationOutcome.CHANGED_ELSEWHERE, next_entry)
 
         failed_index = next(
             (
@@ -430,10 +461,10 @@ def rotate_after_quota(
                 continue
             state_data["active_account_id"] = candidate["account_id"]
             atomic_write_state(state_path, state_data)
-            return "rotated"
+            return RotationDecision(RotationOutcome.ROTATED, dict(candidate))
 
         atomic_write_state(state_path, state_data)
-        return "quota_exhausted"
+        return RotationDecision(RotationOutcome.QUOTA_EXHAUSTED)
 
 
 def walk_values(value: Any) -> Iterator[Any]:
@@ -480,10 +511,19 @@ def guardian_denial_variant(value: Any) -> str | None:
         if identity is None:
             continue
         for field_name, field_value in mapping.items():
-            if field_name.casefold() not in {"decision_source", "rationale"}:
-                continue
-            if isinstance(field_value, str) and any(
-                word in field_value.casefold() for word in DENIAL_WORDS
+            folded_name = field_name.casefold()
+            if (
+                folded_name == "risk_level"
+                and isinstance(field_value, str)
+                and field_value.casefold() in GUARDIAN_DENY_RISK_LEVELS
+            ):
+                return identity
+            if (
+                folded_name in {"decision_source", "rationale"}
+                and isinstance(field_value, str)
+                and any(
+                    word in field_value.casefold() for word in DENIAL_WORDS
+                )
             ):
                 return identity
     return None
@@ -555,32 +595,25 @@ def classify_line(raw_line: bytes) -> LineClassification:
 
 def scan_stderr(stderr_path: Path) -> tuple[str | None, tuple[bytes, ...]]:
     tail: deque[bytes] = deque(maxlen=DIAGNOSTIC_TAIL_LINES)
+    variant: str | None = None
     try:
         with stderr_path.open("rb") as stream:
             for raw_line in stream:
                 tail.append(raw_line)
-                if LOCAL_HOOK_STDERR in raw_line:
-                    return LOCAL_HOOK_STDERR.decode("ascii"), tuple(tail)
+                if variant is None and LOCAL_HOOK_STDERR in raw_line:
+                    variant = LOCAL_HOOK_STDERR.decode("ascii")
     except OSError as error:
         raise WrapperFailure("could not read Codex stderr") from error
-    return None, tuple(tail)
+    return variant, tuple(tail)
 
 
 def classify(stdout_path: Path, stderr_path: Path) -> Classification:
     stderr_variant, stderr_tail = scan_stderr(stderr_path)
+    seen_variants: dict[FailureClass, str] = {}
     if stderr_variant is not None:
-        return Classification(
-            FailureClass.LOCAL_HOOK_DENY,
-            stderr_variant,
-            False,
-            False,
-            (),
-            stderr_tail,
-        )
+        seen_variants[FailureClass.LOCAL_HOOK_DENY] = stderr_variant
 
     stdout_tail: deque[bytes] = deque(maxlen=DIAGNOSTIC_TAIL_LINES)
-    failure_class = FailureClass.UNKNOWN
-    variant: str | None = None
     has_failure_event = False
     has_malformed_line = False
     try:
@@ -594,15 +627,26 @@ def classify(stdout_path: Path, stderr_path: Path) -> Classification:
                 has_malformed_line = has_malformed_line or line_result.is_malformed
                 if line_result.failure_class is None:
                     continue
-                failure_class = line_result.failure_class
-                variant = line_result.variant
-                break
+                if line_result.variant is None:
+                    raise WrapperFailure("decisive classification has no variant")
+                seen_variants.setdefault(
+                    line_result.failure_class, line_result.variant
+                )
     except OSError as error:
         raise WrapperFailure("could not read Codex stdout") from error
 
+    failure_class = next(
+        (
+            candidate
+            for candidate in CLASSIFICATION_PRECEDENCE
+            if candidate in seen_variants
+        ),
+        FailureClass.UNKNOWN,
+    )
+
     return Classification(
         failure_class,
-        variant,
+        seen_variants.get(failure_class),
         has_failure_event,
         has_malformed_line,
         tuple(stdout_tail),
@@ -625,6 +669,12 @@ def copy_private_home(source_home: Path, attempt_home: Path, auth_path: Path) ->
             if not plugins_path.is_dir():
                 raise WrapperFailure("source plugins path is not a directory")
             shutil.copytree(plugins_path, attempt_home / "plugins", symlinks=False)
+        for current_root, directory_names, file_names in os.walk(attempt_home):
+            os.chmod(current_root, 0o700)
+            for directory_name in directory_names:
+                os.chmod(Path(current_root) / directory_name, 0o700)
+            for file_name in file_names:
+                os.chmod(Path(current_root) / file_name, 0o600)
     except OSError as error:
         raise WrapperFailure("could not construct private CODEX_HOME") from error
 
@@ -710,14 +760,13 @@ def run_wrapper(arguments: RunArguments) -> int:
         pool_paths = tuple(source_home / name for name in arguments.pool_names)
         initialize_state(state_path, lock_path, pool_paths)
 
-        active_pool_entry(state_path, lock_path)
+        active_entry = active_pool_entry(state_path, lock_path)
         if os.environ.get("CODEX_KIMI_FORCE") == "1":
             emit_status("force_kimi", task_sig, None, arguments.label)
             return 75
 
         local_hook_hits = 0
         for attempt in range(1, arguments.max_attempts + 1):
-            active_entry = active_pool_entry(state_path, lock_path)
             attempt_home = Path(
                 tempfile.mkdtemp(prefix=f"attempt-{attempt}.", dir=arguments.run_root)
             )
@@ -795,7 +844,7 @@ def run_wrapper(arguments: RunArguments) -> int:
                     classification.variant,
                     datetime.now(timezone.utc),
                 )
-                if rotation == "insufficient_distinct":
+                if rotation.outcome is RotationOutcome.INSUFFICIENT_DISTINCT:
                     emit_status(
                         "no_eligible_credential",
                         task_sig,
@@ -803,7 +852,7 @@ def run_wrapper(arguments: RunArguments) -> int:
                         arguments.label,
                     )
                     return 74
-                if rotation == "quota_exhausted":
+                if rotation.outcome is RotationOutcome.QUOTA_EXHAUSTED:
                     emit_status(
                         "quota_exhausted",
                         task_sig,
@@ -811,6 +860,9 @@ def run_wrapper(arguments: RunArguments) -> int:
                         arguments.label,
                     )
                     return 72
+                if rotation.next_entry is None:
+                    raise WrapperFailure("quota rotation has no next account")
+                active_entry = rotation.next_entry
                 continue
 
             emit_status("unknown", task_sig, codex_exit, arguments.label)

@@ -2,18 +2,29 @@ import Spec.CodexRotation
 
 namespace KimiHooks
 
-theorem firstQuotaIsDecisive :
-    classifySignals [.quota, .cyber, .localHook] = .quota := by
+theorem globalPrecedenceOverridesArrivalOrder :
+    classifySignals [.quota, .cyber, .localHook] = .localHook := by
   rfl
 
 theorem unknownPrefixIsSkipped :
     classifySignals [.unknown, .cyber, .quota] = .cyber := by
   rfl
 
-theorem decisiveScanStopsAfterOne (decisive : RotationFailure)
-    (decisive_ne_unknown : decisive ≠ .unknown) (rest : List RotationFailure) :
-    scannedLineCount (decisive :: rest) = 1 := by
-  cases decisive <;> simp_all [scannedLineCount]
+theorem quotaBeforeCyberClassifiesCyber :
+    classifySignals [.quota, .cyber] = .cyber := by
+  rfl
+
+theorem localBeforeQuotaRemainsLocal :
+    classifySignals [.localHook, .quota] = .localHook := by
+  rfl
+
+theorem localBeforeCyberRemainsLocal :
+    classifySignals [.localHook, .cyber] = .localHook := by
+  rfl
+
+theorem completeStreamIsScanned (signals : List RotationFailure) :
+    scannedLineCount signals = signals.length := by
+  rfl
 
 theorem retainedTailLinesBounded (lineCount : Nat) :
     retainedTailLines lineCount ≤ 50 := by
@@ -34,5 +45,15 @@ theorem futureCooldownIsRetained :
 theorem elapsedCooldownIsPruned (nowSeconds : Int) :
     keepCooldown nowSeconds nowSeconds = false := by
   simp [keepCooldown]
+
+theorem retriesStayPinnedAbsentWithinTaskRotation
+    (pinned : String) (retryCount : Nat) :
+    retryAccounts pinned (List.replicate retryCount none) =
+      List.replicate retryCount pinned := by
+  induction retryCount with
+  | zero => rfl
+  | succ count inductionHypothesis =>
+      simp [List.replicate_succ, retryAccounts, accountForRetry,
+        inductionHypothesis]
 
 end KimiHooks

@@ -71,9 +71,12 @@ root_owner=$(stat -c %u -- "$physical_root") || fail 'cannot inspect data root'
 script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) ||
   fail 'script directory is inaccessible'
 template=$script_dir/../config.example.toml
+hook_normalizer=$script_dir/bootstrap-config-hooks
 [[ -f $template && ! -L $template ]] || fail 'config example is missing or unsafe'
-[[ $(grep -cF 'codex-first-gate.sh' "$template") -eq 1 ]] ||
-  fail 'config example must contain exactly one codex-first gate hook'
+[[ -f $hook_normalizer && ! -L $hook_normalizer ]] ||
+  fail 'hook normalizer is missing or unsafe'
+python3 "$hook_normalizer" validate-template "$template" ||
+  fail 'config example must contain exactly one correct codex-first gate hook'
 
 chmod 0700 -- "$physical_root" || fail 'cannot protect data root'
 [[ ! -L $physical_root && -d $physical_root ]] ||
@@ -89,30 +92,6 @@ protect_existing_target() {
   [[ $(stat -c %u -- "$target") == "$(id -u)" ]] || return 1
   chmod 0600 -- "$target" || return 1
   [[ ! -L $target && -f $target && $(stat -c %a -- "$target") == 600 ]]
-}
-
-extract_codex_hook_stanza() {
-  awk '
-    /^\[\[hooks\]\]$/ {
-      if (block != "" && found) {
-        printf "%s", block
-      }
-      block = $0 ORS
-      found = 0
-      next
-    }
-    {
-      block = block $0 ORS
-      if (index($0, "codex-first-gate.sh") != 0) {
-        found = 1
-      }
-    }
-    END {
-      if (block != "" && found) {
-        printf "%s", block
-      }
-    }
-  ' "$template"
 }
 
 temporary=
@@ -131,18 +110,16 @@ prepare_temporary() {
 
 inject_existing_hook() {
   protect_existing_target || fail 'config target must be a safe regular file'
-  if grep -Fq 'codex-first-gate.sh' "$target"; then
-    return
-  fi
-
   prepare_temporary
-  cp -- "$target" "$temporary" || fail 'cannot copy existing config bytes'
-  printf '\n' >>"$temporary" || fail 'cannot separate injected hook stanza'
-  extract_codex_hook_stanza >>"$temporary" || fail 'cannot extract gate hook stanza'
-  [[ $(grep -cF 'codex-first-gate.sh' "$temporary") -eq 1 ]] ||
-    fail 'prepared config has an invalid gate hook count'
+  python3 "$hook_normalizer" normalize "$target" "$template" "$temporary" ||
+    fail 'cannot structurally normalize gate hook stanzas'
   chmod 0600 -- "$temporary" || fail 'cannot protect prepared config'
   protect_existing_target || fail 'config target changed during update'
+  if cmp -s -- "$target" "$temporary"; then
+    rm -- "$temporary"
+    temporary=
+    return
+  fi
   mv -f -- "$temporary" "$target" || fail 'cannot publish updated config'
   temporary=
   protect_existing_target || fail 'published config is not a safe regular file'

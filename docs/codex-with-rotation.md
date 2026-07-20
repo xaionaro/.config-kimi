@@ -16,7 +16,9 @@ correlation. It is not forwarded to Codex or included in `task_sig`. Everything
 after `--` is passed literally after `codex exec --ephemeral --json`.
 
 The wrapper captures stdin once in a mode-0600 spool under `~/tmp/`. Each of at
-most three attempts receives the same bytes and literal argv.
+most three attempts receives the same bytes and literal argv. It reads and pins
+the active account once at task start. Local-hook and cyber retries keep that
+account even if another process changes global active state.
 
 ## State and credential isolation
 
@@ -33,16 +35,19 @@ single distinct account may run normally, but a later rotation request exits
 74 before changing accounts.
 
 For each attempt, the wrapper creates a mode-0700 directory under `~/tmp/` and
-makes real copies of the active credential, `config.toml`, `hooks/`, and
-`plugins/` when present. The copied `auth.json` is mode 0600. Pool members are
-opened read-only and retain their original mode and bytes. OAuth refresh writes
-made by Codex land only in the disposable copy and are discarded.
+makes real copies of the task's pinned credential, `config.toml`, `hooks/`, and
+`plugins/` when present. Copied directories are mode 0700 and copied files are
+mode 0600. Pool members are opened read-only and retain their original mode and
+bytes. OAuth refresh writes made by Codex land only in the disposable copy and
+are discarded.
 
 State updates use an in-directory mode-0600 temporary file, `fsync`, and atomic
 replacement while holding the exclusive lock. Reads that choose an account use
 the shared lock. Quota rotation re-reads `active_account_id` under the exclusive
 lock; if another process already moved it away from the failed ID, the stale
-process records the failed account's cooldown but does not rotate again.
+process records the failed account's cooldown but does not rotate again. A
+quota decision is the only within-task operation that changes the pinned
+account; its locked result supplies the next pinned pool entry directly.
 
 Every state write drops cooldowns whose `until_utc` has passed and task streaks
 whose `last_observed_utc` is more than 600 seconds old. Resetting a task removes
@@ -53,7 +58,8 @@ its entry instead of retaining a zero-count tombstone.
 - `bin/codex-with-rotation` owns the readonly `MAX_ATTEMPTS` and `POOL_NAMES`
   Bash constants. It renders them into help and passes them to the classifier.
 - `bin/codex-with-rotation-classify` owns state schema, cooldown/window lengths,
-  classification variants, within-event priority, and the 50-line
+  classification variants, whole-stream priority, Guardian deny risk levels,
+  and the 50-line
   diagnostic-tail bound as Python module constants.
 - Pool filenames seed `.auth-active.pool` only when state is first created.
   Thereafter the locked state file is the account-order source of truth; changing
@@ -79,20 +85,21 @@ correlation key, not a cryptographic encoding of an unambiguous argv tuple.
 
 ## Classification and actions
 
-Within one stdout event, classification precedence is `local_hook_deny`,
-`cyber`, `quota`, then `unknown`. Stderr is scanned first for the local-hook
-substring; otherwise, the first decisive stdout line determines the result.
+Across the complete stdout event stream, classification precedence is
+`local_hook_deny`, `cyber`, `quota`, then `unknown`, independent of arrival
+order. Stderr is scanned first for the highest-priority local-hook substring.
 
-The classifier reads stdout JSONL and stderr line-by-line. Each parsed event is
-discarded immediately after its stateless classification. Only separate
+The classifier reads stdout JSONL and stderr line-by-line through end of file.
+Each parsed event is discarded immediately after its stateless classification;
+only one first-seen variant per decisive class is retained. Separate
 `deque(maxlen=50)` raw-line tails survive for an unknown-result diagnostic, so
 classification memory does not grow with output length and the files are not
-read again to produce tails. The stdout scan stops at its first decisive line.
+read again to produce tails.
 
 | Class | Recognized variants | Action |
 |---|---|---|
-| `local_hook_deny` | `approval_denied`; denied `CommandExecutionApproval`; exact PreToolUse-block stderr text | Retry once on the same account; a second hit exits 73. |
-| `cyber` | `CyberPolicyResponse`, `cyber_policy`, `HighRiskCyberActivity`, `high_risk_cyber_activity`; denying/blocking/rejecting guardian assessment | First hit records a per-`task_sig` streak and retries the same account. A second hit within 600 seconds exits 75. |
+| `local_hook_deny` | `approval_denied`; denied `CommandExecutionApproval`; exact PreToolUse-block stderr text | Retry once on the pinned account; a second hit exits 73. |
+| `cyber` | `CyberPolicyResponse`, `cyber_policy`, `HighRiskCyberActivity`, `high_risk_cyber_activity`; denying/blocking/rejecting guardian assessment; Guardian `risk_level` `high`, `critical`, or `severe` (case-insensitive) | First hit records a per-`task_sig` streak and retries the pinned account. A second hit within 600 seconds exits 75. Missing, empty, and other Guardian risk levels are not cyber signals by themselves. |
 | `quota` | Usage/rate/session-budget/quota/not-included variants, or `codex_error_http_status_code` 429 | Cool the failed account for 600 seconds and advance in pool order, skipping active cooldowns. |
 | `unknown` | Malformed, unmatched, or otherwise unclassified failure output | Fail closed with exit 76 and the last 50 stdout/stderr lines. |
 

@@ -5,6 +5,7 @@ program=${0##*/}
 script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -P -- "$script_dir/.." && pwd)
 roles_file=$repo_root/lib/codex-roles.txt
+session_library=$repo_root/lib/codex-sessions-validate.sh
 proof_library=$repo_root/hooks/lib/kimi-proof-state.sh
 
 fail() {
@@ -13,7 +14,10 @@ fail() {
 }
 
 [[ -f $roles_file && ! -L $roles_file ]] || fail 'role source is missing or unsafe'
+[[ -f $session_library && ! -L $session_library ]] || fail 'session validator is missing or unsafe'
 [[ -f $proof_library && ! -L $proof_library ]] || fail 'proof-state library is missing or unsafe'
+# shellcheck source=../lib/codex-sessions-validate.sh
+. "$session_library"
 # shellcheck source=../hooks/lib/kimi-proof-state.sh
 . "$proof_library"
 
@@ -50,7 +54,8 @@ EOF
 
 Session selection:
   --session <id> overrides KIMI_SESSION_ID. A session ID may contain only
-  ASCII letters, digits, dot, underscore, and hyphen.
+  ASCII letters, digits, dot, underscore, and hyphen; it must start with a
+  letter, digit, or underscore and must not contain two consecutive dots.
 
 The marker path is printed to stdout. Markers are claimed once by
 codex-first-gate.sh and expire after 600 seconds. KIMI_PROOF_ROOT replaces the
@@ -87,7 +92,7 @@ while (($#)); do
 done
 
 [[ -n $sid ]] || fail 'KIMI_SESSION_ID or --session is required'
-[[ $sid =~ ^[A-Za-z0-9._-]+$ ]] || fail 'invalid session ID'
+codex_session_id_is_valid "$sid" || fail 'invalid session ID'
 
 case $mode in
   --cyber)

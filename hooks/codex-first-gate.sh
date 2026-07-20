@@ -12,9 +12,13 @@ command -v jq >/dev/null && command -v flock >/dev/null || deny
 script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || deny
 repo_root=$(cd -P -- "$script_dir/.." && pwd) || deny
 roles_file=$repo_root/lib/codex-roles.txt
+session_library=$repo_root/lib/codex-sessions-validate.sh
 proof_library=$repo_root/hooks/lib/kimi-proof-state.sh
 [[ -f $roles_file && ! -L $roles_file ]] || deny
+[[ -f $session_library && ! -L $session_library ]] || deny
 [[ -f $proof_library && ! -L $proof_library ]] || deny
+# shellcheck source=../lib/codex-sessions-validate.sh
+. "$session_library" || deny
 # shellcheck source=lib/kimi-proof-state.sh
 . "$proof_library" || deny
 
@@ -30,7 +34,8 @@ cyber_pattern='^[0-9a-f]{64}$'
 orchestration_pattern="^orchestration-($role_pattern)-[0-9a-f]{16}$"
 
 input=$(cat) || deny
-sid=$(jq -er '.session_id|select(type=="string" and test("^[A-Za-z0-9._-]+$"))' <<<"$input") || deny
+sid=$(jq -er '.session_id|select(type=="string")' <<<"$input") || deny
+codex_session_id_is_valid "$sid" || deny
 base=$(kimi_proof_root) || deny
 dir=$base/$sid/cyber-escalation
 [[ -d $dir && ! -L $base && ! -L $base/$sid && ! -L $dir ]] || deny

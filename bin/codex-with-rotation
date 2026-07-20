@@ -12,6 +12,14 @@ readonly -a POOL_NAMES=(
 script_dir=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly script_dir
 readonly CLASSIFIER=$script_dir/codex-with-rotation-classify
+readonly SESSION_LIBRARY=$script_dir/../lib/codex-sessions-validate.sh
+
+if [[ ! -f $SESSION_LIBRARY || -L $SESSION_LIBRARY ]]; then
+  printf '%s\n' '{"wrapper":"codex-with-rotation","class":"wrapper_failure","label":null,"task_sig":null,"codex_exit":null}' >&2
+  exit 71
+fi
+# shellcheck source=../lib/codex-sessions-validate.sh
+. "$SESSION_LIBRARY"
 
 show_help() {
   cat <<'EOF'
@@ -43,7 +51,13 @@ EOF
   CODEX_ROTATE_STATE_DIR replaces ~/.codex for state, lock, pool, config,
   hooks, and plugins. It exists for isolated testing.
 
+  The active account is pinned at task start. Local-hook and cyber retries keep
+  that account even if another process changes global active state. A quota
+  decision may repin this task to the locked rotation decision's next account.
+
 Classification precedence (highest first):
+  The complete stdout event stream is consumed before this precedence is
+  applied, so arrival order cannot override a higher-priority class.
   1. local_hook_deny
      - item.type == approval_denied
      - item.type contains CommandExecutionApproval and the item says denied
@@ -53,6 +67,8 @@ Classification precedence (highest first):
        high_risk_cyber_activity
      - GuardianAssessmentEvent or guardian_assessment_event with a
        decision_source or rationale containing deny, block, or reject
+     - Guardian risk_level high, critical, or severe (case-insensitive); an
+       empty, missing, or other risk_level is not a cyber signal by itself
   3. quota
      - UsageLimitReached, usage_limit_reached, RateLimitReached,
        rate_limit_reached, SessionBudgetExceeded, session_budget_exceeded,
@@ -104,6 +120,7 @@ Caveats:
     synthetic-fixture coverage and unmatched output fails closed with exit 76.
   - Capability markers are not cryptographically authenticated. They prevent
     accidental quota use, not abuse by a hostile same-UID process.
+  - Markers are session-scoped capability tokens, not task-bound authorizations; they defend against accidental Kimi-quota consumption, not against orchestrator bugs or hostile same-UID processes. An orchestrator that issues a marker for task A and then calls Agent for unrelated task B will consume the marker on B.
   - Exit codes 73-76 are wrapper-private. Never interpret one as a raw Codex
     status.
   - Exit-71 diagnostics retain private attempt homes, including copied
@@ -184,7 +201,7 @@ preserve_failure_diagnostics() {
   local session_id=${SESSION_ID:-${KIMI_SESSION_ID:-unknown-session}}
   local session_dir failure_dir timestamp destination
 
-  [[ $session_id =~ ^[A-Za-z0-9._-]+$ ]] || session_id=unknown-session
+  codex_session_id_is_valid "$session_id" || return 1
   [[ $PROOF_ROOT == /* && $PROOF_ROOT != / ]] || return 1
   session_dir=$PROOF_ROOT/$session_id
   failure_dir=$session_dir/codex-with-rotation-failures

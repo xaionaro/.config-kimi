@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import re
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TypeAlias
+
+
+JsonObject: TypeAlias = dict[str, Any]
+HOOK_HEADER = re.compile(
+    r"^[ \t]*\[\[hooks\]\][ \t]*(?:#.*)?(?:\r?\n)?$"
+)
+TABLE_HEADER = re.compile(
+    r"^[ \t]*\[{1,2}[^\]\r\n]+\]{1,2}[ \t]*(?:#.*)?(?:\r?\n)?$"
+)
+GATE_COMMAND = "codex-first-gate.sh"
+GATE_EVENT = "PreToolUse"
+GATE_TOOLS = ("Agent", "AgentSwarm")
+
+
+@dataclass(frozen=True)
+class HookBlock:
+    start: int
+    end: int
+    text: str
+    hook: JsonObject
+
+
+def matcher_accepts_gate_tools(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        matcher = re.compile(value)
+    except re.error:
+        return False
+    return all(matcher.fullmatch(tool) is not None for tool in GATE_TOOLS)
+
+
+def is_gate_hook(hook: JsonObject) -> bool:
+    command = hook.get("command")
+    return isinstance(command, str) and GATE_COMMAND in command
+
+
+def is_correct_gate_hook(hook: JsonObject) -> bool:
+    return (
+        hook.get("event") == GATE_EVENT
+        and matcher_accepts_gate_tools(hook.get("matcher"))
+        and is_gate_hook(hook)
+    )
+
+
+def read_utf8(path: Path) -> str:
+    return path.read_bytes().decode("utf-8")
+
+
+def write_utf8(path: Path, content: str) -> None:
+    path.write_bytes(content.encode("utf-8"))
+
+
+def hook_blocks(document: str) -> list[HookBlock]:
+    tomllib.loads(document)
+    lines = document.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    blocks: list[HookBlock] = []
+    for start_line, line in enumerate(lines):
+        if HOOK_HEADER.fullmatch(line) is None:
+            continue
+        end_line = start_line + 1
+        while end_line < len(lines) and TABLE_HEADER.fullmatch(lines[end_line]) is None:
+            end_line += 1
+        start = offsets[start_line]
+        end = offsets[end_line] if end_line < len(offsets) else len(document)
+        block_text = document[start:end]
+        parsed = tomllib.loads(block_text).get("hooks")
+        if not isinstance(parsed, list) or len(parsed) != 1:
+            raise ValueError("invalid [[hooks]] block")
+        hook = parsed[0]
+        if not isinstance(hook, dict):
+            raise ValueError("invalid [[hooks]] fields")
+        blocks.append(HookBlock(start, end, block_text, hook))
+    return blocks
+
+
+def template_gate_block(template: str) -> HookBlock:
+    matches = [
+        block for block in hook_blocks(template) if is_correct_gate_hook(block.hook)
+    ]
+    if len(matches) != 1:
+        raise ValueError("template must contain exactly one correct codex-first hook")
+    return matches[0]
+
+
+def normalize_hooks(document: str, template: str) -> str:
+    blocks = hook_blocks(document)
+    gate_blocks = [block for block in blocks if is_gate_hook(block.hook)]
+    correct_blocks = [block for block in gate_blocks if is_correct_gate_hook(block.hook)]
+    retained = correct_blocks[0] if correct_blocks else None
+    removed = {
+        (block.start, block.end)
+        for block in gate_blocks
+        if retained is None or block != retained
+    }
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in sorted(removed):
+        pieces.append(document[cursor:start])
+        cursor = end
+    pieces.append(document[cursor:])
+    normalized = "".join(pieces)
+
+    if retained is None:
+        if normalized and not normalized.endswith(("\n", "\r")):
+            normalized += "\n"
+        if normalized and not normalized.endswith(("\n\n", "\r\n\r\n")):
+            normalized += "\n"
+        normalized += template_gate_block(template).text
+    return normalized
+
+
+def main(arguments: list[str]) -> int:
+    try:
+        if len(arguments) == 2 and arguments[0] == "validate-template":
+            template_gate_block(read_utf8(Path(arguments[1])))
+            return 0
+        if len(arguments) == 4 and arguments[0] == "normalize":
+            target = read_utf8(Path(arguments[1]))
+            template = read_utf8(Path(arguments[2]))
+            write_utf8(Path(arguments[3]), normalize_hooks(target, template))
+            return 0
+    except (OSError, ValueError) as error:
+        print(f"bootstrap-config-hooks: {error}", file=sys.stderr)
+        return 1
+    print(
+        "usage: bootstrap-config-hooks "
+        "{validate-template <template> | normalize <target> <template> <output>}",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
