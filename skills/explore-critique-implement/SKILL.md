@@ -553,6 +553,15 @@ Track blocked goal turns independently by exact task ID; activity on another tas
 | `count=2` | Later blocked goal turn without terminal output | Set `count=3` and latch `no-more-blocking`. Stop blocking on that task. Advance independent work, or classify/recover it only under existing stale rules. |
 | Any count | Terminal output arrives | Clear the entry and route the terminal result. |
 
+**Persistent enforcement.** `~/.cache/kimi-proof/$SESSION_ID/block-no-progress.json` is the authoritative counter store. Its content is one JSON object mapping exact task IDs to integer counts.
+
+1. At the start of every goal turn, read the file. Treat a missing file as `{}`; do not infer counts from memory.
+2. Before ending the turn blocked on a running background task, read that task ID's stored count. If it is below `3`, increment it and write the entire object back. If the increment reaches `3`, apply the table's `no-more-blocking` action instead of blocking again.
+3. If the stored count is already `3`, do not block on that task. Advance other useful work; if none can advance, call `UpdateGoal(status: "blocked")` and classify the task as stuck.
+4. When terminal output arrives, delete that task ID from the object and write the file back.
+
+Create the session proof directory and file on first write.
+
 `count=3` does not itself prove staleness or authorize cancellation. A replacement task has a new ID and remains outside this same-ID guard, subject to existing workflow limits.
 
 Hard escalation is the terminal case: three full cycles, loop-breaker, and BRP have all been exhausted. Call `UpdateGoal(status: "blocked")` at hard escalation — this IS the three-consecutive-turn threshold met.
